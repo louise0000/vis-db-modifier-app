@@ -318,12 +318,8 @@ function relationshipArrayIssue(record, field) {
   return null;
 }
 
-function buildIntegrityReport(records) {
-  const recordsById = new Map();
-  const idGroups = new Map();
-  const duplicateLabelGroups = new Map();
-
-  const issues = {
+function createEmptyIntegrityIssues() {
+  return {
     recordsMissingId: [],
     duplicateIds: [],
     missingParentIdField: [],
@@ -337,57 +333,116 @@ function buildIntegrityReport(records) {
     duplicateLabelsByType: [],
     historicalInfoRelationshipFields: []
   };
+}
 
-  records.forEach(record => {
-    if (!record.id) {
-      issues.recordsMissingId.push(createRecordSummary(record));
-    } else {
-      if (!idGroups.has(record.id)) idGroups.set(record.id, []);
-      idGroups.get(record.id).push(record);
+function describeRelationshipValue(value) {
+  if (value === null) return '[null]';
+  if (value === undefined) return '[undefined]';
+  const stringValue = String(value).trim();
+  return stringValue || '[empty string]';
+}
 
-      // First one wins for lookup purposes; duplicate IDs are reported separately.
-      if (!recordsById.has(record.id)) {
-        recordsById.set(record.id, record);
-      }
-    }
+function isDirtyRelationshipValue(value) {
+  if (value === null || value === undefined) return true;
+  const stringValue = String(value).trim().toLowerCase();
+  return stringValue === '' || stringValue === 'null' || stringValue === 'undefined';
+}
 
-    const labelKey = normaliseLabelForIntegrity(record.info?.label);
-    if (labelKey) {
-      const typeKey = normaliseLabelForIntegrity(record.info?.type || 'unknown');
-      const groupKey = `${typeKey}::${labelKey}`;
-      if (!duplicateLabelGroups.has(groupKey)) {
-        duplicateLabelGroups.set(groupKey, {
-          label: record.info?.label || '',
-          type: record.info?.type || 'unknown',
-          records: []
-        });
-      }
-      duplicateLabelGroups.get(groupKey).records.push(createRecordSummary(record));
-    }
+function createMissingReferenceGroups(items, missingValueKey) {
+  const groups = new Map();
 
-    if (record.info && (Object.prototype.hasOwnProperty.call(record.info, 'parentId') || Object.prototype.hasOwnProperty.call(record.info, 'children'))) {
-      issues.historicalInfoRelationshipFields.push({
-        record: createRecordSummary(record),
-        hasInfoParentId: Object.prototype.hasOwnProperty.call(record.info, 'parentId'),
-        hasInfoChildren: Object.prototype.hasOwnProperty.call(record.info, 'children')
+  items.forEach(item => {
+    const rawValue = item[missingValueKey];
+    const displayValue = describeRelationshipValue(rawValue);
+    const groupKey = `${typeof rawValue}::${displayValue}`;
+
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, {
+        missingId: rawValue ?? null,
+        displayValue,
+        valueKind: isDirtyRelationshipValue(rawValue) ? 'dirty-array-value' : 'missing-record-id',
+        count: 0,
+        records: []
       });
     }
 
-    const parentIssue = relationshipArrayIssue(record, 'parentId');
-    if (parentIssue?.valueType === 'missing') {
-      issues.missingParentIdField.push(parentIssue);
-    } else if (parentIssue) {
-      issues.malformedParentId.push(parentIssue);
-    }
-
-    const childrenIssue = relationshipArrayIssue(record, 'children');
-    if (childrenIssue?.valueType === 'missing') {
-      issues.missingChildrenField.push(childrenIssue);
-    } else if (childrenIssue) {
-      issues.malformedChildren.push(childrenIssue);
-    }
+    const group = groups.get(groupKey);
+    group.count += 1;
+    group.records.push(item.record);
   });
 
+  return Array.from(groups.values()).sort((a, b) => b.count - a.count || a.displayValue.localeCompare(b.displayValue));
+}
+
+function createGroupedIntegrityDiagnostics(issues) {
+  return {
+    missingParentIdsGrouped: createMissingReferenceGroups(issues.parentIdsPointingNowhere, 'missingParentId'),
+    missingChildIdsGrouped: createMissingReferenceGroups(issues.childrenIdsPointingNowhere, 'missingChildId')
+  };
+}
+
+function registerIdAndLabelGroups(record, recordsById, idGroups, duplicateLabelGroups, issues) {
+  if (!record.id) {
+    issues.recordsMissingId.push(createRecordSummary(record));
+  } else {
+    if (!idGroups.has(record.id)) idGroups.set(record.id, []);
+    idGroups.get(record.id).push(record);
+
+    // First one wins for lookup purposes; duplicate IDs are reported separately.
+    if (!recordsById.has(record.id)) {
+      recordsById.set(record.id, record);
+    }
+  }
+
+  const labelKey = normaliseLabelForIntegrity(record.info?.label);
+  if (!labelKey) return;
+
+  const typeKey = normaliseLabelForIntegrity(record.info?.type || 'unknown');
+  const groupKey = `${typeKey}::${labelKey}`;
+
+  if (!duplicateLabelGroups.has(groupKey)) {
+    duplicateLabelGroups.set(groupKey, {
+      label: record.info?.label || '',
+      type: record.info?.type || 'unknown',
+      records: []
+    });
+  }
+
+  duplicateLabelGroups.get(groupKey).records.push(createRecordSummary(record));
+}
+
+function registerHistoricalInfoRelationshipFields(record, issues) {
+  if (!record.info) return;
+
+  const hasInfoParentId = Object.prototype.hasOwnProperty.call(record.info, 'parentId');
+  const hasInfoChildren = Object.prototype.hasOwnProperty.call(record.info, 'children');
+
+  if (hasInfoParentId || hasInfoChildren) {
+    issues.historicalInfoRelationshipFields.push({
+      record: createRecordSummary(record),
+      hasInfoParentId,
+      hasInfoChildren
+    });
+  }
+}
+
+function registerRelationshipArrayShapeIssues(record, issues) {
+  const parentIssue = relationshipArrayIssue(record, 'parentId');
+  if (parentIssue?.valueType === 'missing') {
+    issues.missingParentIdField.push(parentIssue);
+  } else if (parentIssue) {
+    issues.malformedParentId.push(parentIssue);
+  }
+
+  const childrenIssue = relationshipArrayIssue(record, 'children');
+  if (childrenIssue?.valueType === 'missing') {
+    issues.missingChildrenField.push(childrenIssue);
+  } else if (childrenIssue) {
+    issues.malformedChildren.push(childrenIssue);
+  }
+}
+
+function registerDuplicateGroups(idGroups, duplicateLabelGroups, issues) {
   idGroups.forEach((group, id) => {
     if (group.length > 1) {
       issues.duplicateIds.push({
@@ -408,51 +463,70 @@ function buildIntegrityReport(records) {
       });
     }
   });
+}
+
+function registerRelationshipConsistencyIssues(record, recordsById, issues) {
+  const recordSummary = createRecordSummary(record);
+
+  if (Array.isArray(record.parentId)) {
+    record.parentId.forEach(parentId => {
+      const parent = recordsById.get(parentId);
+      if (!parent) {
+        issues.parentIdsPointingNowhere.push({
+          record: recordSummary,
+          missingParentId: parentId
+        });
+        return;
+      }
+
+      if (!Array.isArray(parent.children) || !parent.children.includes(record.id)) {
+        issues.childParentNotReciprocated.push({
+          child: recordSummary,
+          parent: createRecordSummary(parent),
+          relationship: `${record.id} lists parent ${parentId}, but parent does not list child`
+        });
+      }
+    });
+  }
+
+  if (Array.isArray(record.children)) {
+    record.children.forEach(childId => {
+      const child = recordsById.get(childId);
+      if (!child) {
+        issues.childrenIdsPointingNowhere.push({
+          record: recordSummary,
+          missingChildId: childId
+        });
+        return;
+      }
+
+      if (!Array.isArray(child.parentId) || !child.parentId.includes(record.id)) {
+        issues.parentChildNotReciprocated.push({
+          parent: recordSummary,
+          child: createRecordSummary(child),
+          relationship: `${record.id} lists child ${childId}, but child does not list parent`
+        });
+      }
+    });
+  }
+}
+
+function buildIntegrityReport(records) {
+  const recordsById = new Map();
+  const idGroups = new Map();
+  const duplicateLabelGroups = new Map();
+  const issues = createEmptyIntegrityIssues();
 
   records.forEach(record => {
-    const recordSummary = createRecordSummary(record);
+    registerIdAndLabelGroups(record, recordsById, idGroups, duplicateLabelGroups, issues);
+    registerHistoricalInfoRelationshipFields(record, issues);
+    registerRelationshipArrayShapeIssues(record, issues);
+  });
 
-    if (Array.isArray(record.parentId)) {
-      record.parentId.forEach(parentId => {
-        const parent = recordsById.get(parentId);
-        if (!parent) {
-          issues.parentIdsPointingNowhere.push({
-            record: recordSummary,
-            missingParentId: parentId
-          });
-          return;
-        }
+  registerDuplicateGroups(idGroups, duplicateLabelGroups, issues);
 
-        if (!Array.isArray(parent.children) || !parent.children.includes(record.id)) {
-          issues.childParentNotReciprocated.push({
-            child: recordSummary,
-            parent: createRecordSummary(parent),
-            relationship: `${record.id} lists parent ${parentId}, but parent does not list child`
-          });
-        }
-      });
-    }
-
-    if (Array.isArray(record.children)) {
-      record.children.forEach(childId => {
-        const child = recordsById.get(childId);
-        if (!child) {
-          issues.childrenIdsPointingNowhere.push({
-            record: recordSummary,
-            missingChildId: childId
-          });
-          return;
-        }
-
-        if (!Array.isArray(child.parentId) || !child.parentId.includes(record.id)) {
-          issues.parentChildNotReciprocated.push({
-            parent: recordSummary,
-            child: createRecordSummary(child),
-            relationship: `${record.id} lists child ${childId}, but child does not list parent`
-          });
-        }
-      });
-    }
+  records.forEach(record => {
+    registerRelationshipConsistencyIssues(record, recordsById, issues);
   });
 
   const summary = Object.fromEntries(
@@ -463,6 +537,7 @@ function buildIntegrityReport(records) {
     generatedAt: new Date().toISOString(),
     totalRecords: records.length,
     summary,
+    groupedDiagnostics: createGroupedIntegrityDiagnostics(issues),
     issues
   };
 }

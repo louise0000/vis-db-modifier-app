@@ -500,3 +500,26 @@ nav ul li a:hover {
     border-radius: 6px;
     font-size: 12px;
 }
+
+/* Grouped integrity diagnostics */
+.integrity-grouped-section {
+    border-style: dashed;
+}
+
+.integrity-group {
+    margin: 10px 0;
+    padding: 8px;
+    background: #ffffff88;
+    border: 1px solid #00000018;
+    border-radius: 6px;
+}
+
+.integrity-group summary {
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.integrity-group pre {
+    margin-top: 8px;
+    max-height: 30vh;
+}

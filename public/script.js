@@ -1067,6 +1067,41 @@ function appendIntegritySection(container, title, items) {
     container.appendChild(section);
 }
 
+function appendGroupedIntegritySection(container, title, groups) {
+    const section = document.createElement('div');
+    section.classList.add('integrity-section', 'integrity-grouped-section');
+
+    const heading = document.createElement('h3');
+    heading.textContent = `${title} (${groups.length})`;
+    section.appendChild(heading);
+
+    if (!groups.length) {
+        const ok = document.createElement('p');
+        ok.textContent = 'No grouped issues found.';
+        section.appendChild(ok);
+        container.appendChild(section);
+        return;
+    }
+
+    groups.forEach(group => {
+        const groupBlock = document.createElement('details');
+        groupBlock.classList.add('integrity-group');
+        groupBlock.open = group.count > 1 || group.valueKind === 'dirty-array-value';
+
+        const summary = document.createElement('summary');
+        summary.textContent = `${group.displayValue} — ${group.count} record${group.count === 1 ? '' : 's'} (${group.valueKind})`;
+        groupBlock.appendChild(summary);
+
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(group.records || [], null, 2);
+        groupBlock.appendChild(pre);
+
+        section.appendChild(groupBlock);
+    });
+
+    container.appendChild(section);
+}
+
 function renderIntegrityReport(report) {
     const container = document.getElementById('integrity-report-results');
     container.innerHTML = '';
@@ -1094,6 +1129,18 @@ function renderIntegrityReport(report) {
     });
 
     container.appendChild(summaryWrapper);
+
+    appendGroupedIntegritySection(
+        container,
+        'Missing Parent IDs Grouped',
+        report.groupedDiagnostics?.missingParentIdsGrouped || []
+    );
+
+    appendGroupedIntegritySection(
+        container,
+        'Missing Child IDs Grouped',
+        report.groupedDiagnostics?.missingChildIdsGrouped || []
+    );
 
     const issueOrder = [
         'recordsMissingId',
