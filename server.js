@@ -616,6 +616,216 @@ async function applyHistoricalInfoRelationshipCleanup(collection) {
   };
 }
 
+
+function createReciprocalRelationshipRepairPreview(records) {
+  const recordsById = new Map(records.filter(record => record.id).map(record => [record.id, record]));
+  const addChildReferenceChanges = [];
+  const addParentReferenceChanges = [];
+  const seenAddChild = new Set();
+  const seenAddParent = new Set();
+
+  records.forEach(child => {
+    if (!child.id || !Array.isArray(child.parentId)) return;
+
+    child.parentId.forEach(parentId => {
+      if (isDirtyRelationshipValue(parentId)) return;
+      const parent = recordsById.get(parentId);
+      if (!parent || !parent.id) return;
+
+      const parentChildren = Array.isArray(parent.children) ? parent.children : [];
+      if (parentChildren.includes(child.id)) return;
+
+      const key = `${parent.id}::${child.id}`;
+      if (seenAddChild.has(key)) return;
+      seenAddChild.add(key);
+
+      addChildReferenceChanges.push({
+        actionKey: `add-child-to-parent::${parent.id}::${child.id}`,
+        direction: 'add-child-to-parent',
+        parent: createRecordSummary(parent),
+        child: createRecordSummary(child),
+        addActionLabel: 'Add child ID to parent.children',
+        removeActionLabel: 'Remove parent ID from child.parentId',
+        explanation: 'The child already lists this parent, but the parent does not list this child.',
+        children: {
+          before: parentChildren,
+          after: Array.from(new Set([...parentChildren, child.id])),
+          add: child.id
+        },
+        parentId: {
+          before: child.parentId,
+          afterIfRemoved: child.parentId.filter(id => id !== parent.id),
+          remove: parent.id
+        }
+      });
+    });
+  });
+
+  records.forEach(parent => {
+    if (!parent.id || !Array.isArray(parent.children)) return;
+
+    parent.children.forEach(childId => {
+      if (isDirtyRelationshipValue(childId)) return;
+      const child = recordsById.get(childId);
+      if (!child || !child.id) return;
+
+      const childParentIds = Array.isArray(child.parentId) ? child.parentId : [];
+      if (childParentIds.includes(parent.id)) return;
+
+      const key = `${child.id}::${parent.id}`;
+      if (seenAddParent.has(key)) return;
+      seenAddParent.add(key);
+
+      addParentReferenceChanges.push({
+        actionKey: `add-parent-to-child::${parent.id}::${child.id}`,
+        direction: 'add-parent-to-child',
+        parent: createRecordSummary(parent),
+        child: createRecordSummary(child),
+        addActionLabel: 'Add parent ID to child.parentId',
+        removeActionLabel: 'Remove child ID from parent.children',
+        explanation: 'The parent already lists this child, but the child does not list this parent.',
+        parentId: {
+          before: childParentIds,
+          after: Array.from(new Set([...childParentIds, parent.id])),
+          add: parent.id
+        },
+        children: {
+          before: parent.children,
+          afterIfRemoved: parent.children.filter(id => id !== child.id),
+          remove: child.id
+        }
+      });
+    });
+  });
+
+  return {
+    count: addChildReferenceChanges.length + addParentReferenceChanges.length,
+    addChildReferenceCount: addChildReferenceChanges.length,
+    addParentReferenceCount: addParentReferenceChanges.length,
+    addChildReferenceChanges,
+    addParentReferenceChanges
+  };
+}
+
+function findReciprocalRelationshipChange(preview, actionKey) {
+  const allChanges = [
+    ...(preview.addChildReferenceChanges || []),
+    ...(preview.addParentReferenceChanges || [])
+  ];
+
+  return allChanges.find(change => change.actionKey === actionKey);
+}
+
+function buildReviewedReciprocalRelationshipOperations(preview, requestedActions) {
+  if (!Array.isArray(requestedActions)) {
+    throw new Error('Expected actions to be an array.');
+  }
+
+  const operations = [];
+  const seen = new Set();
+  const appliedActions = [];
+
+  requestedActions.forEach(action => {
+    const actionKey = action?.actionKey;
+    const resolution = action?.resolution;
+
+    if (!actionKey || !resolution) return;
+    if (!['add-reciprocal', 'remove-asserted'].includes(resolution)) {
+      throw new Error(`Unsupported reciprocal relationship resolution: ${resolution}`);
+    }
+
+    const dedupeKey = `${actionKey}::${resolution}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+
+    const change = findReciprocalRelationshipChange(preview, actionKey);
+    if (!change) {
+      throw new Error(`Could not find reciprocal relationship change for actionKey: ${actionKey}`);
+    }
+
+    if (change.direction === 'add-child-to-parent') {
+      if (resolution === 'add-reciprocal') {
+        operations.push({
+          updateOne: {
+            filter: { id: change.parent.id },
+            update: { $addToSet: { children: change.child.id } }
+          }
+        });
+      } else {
+        operations.push({
+          updateOne: {
+            filter: { id: change.child.id },
+            update: { $pull: { parentId: change.parent.id } }
+          }
+        });
+      }
+    }
+
+    if (change.direction === 'add-parent-to-child') {
+      if (resolution === 'add-reciprocal') {
+        operations.push({
+          updateOne: {
+            filter: { id: change.child.id },
+            update: { $addToSet: { parentId: change.parent.id } }
+          }
+        });
+      } else {
+        operations.push({
+          updateOne: {
+            filter: { id: change.parent.id },
+            update: { $pull: { children: change.child.id } }
+          }
+        });
+      }
+    }
+
+    appliedActions.push({
+      actionKey,
+      resolution,
+      direction: change.direction,
+      parent: change.parent,
+      child: change.child
+    });
+  });
+
+  return { operations, appliedActions };
+}
+
+async function applyReviewedReciprocalRelationshipActions(collection, requestedActions) {
+  const records = await collection.find({}, {
+    projection: {
+      _id: 0,
+      id: 1,
+      parentId: 1,
+      children: 1,
+      info: 1
+    }
+  }).toArray();
+
+  const preview = createReciprocalRelationshipRepairPreview(records);
+  const { operations, appliedActions } = buildReviewedReciprocalRelationshipOperations(preview, requestedActions);
+
+  if (operations.length === 0) {
+    return {
+      matchedCount: 0,
+      modifiedCount: 0,
+      requestedCount: Array.isArray(requestedActions) ? requestedActions.length : 0,
+      appliedActions,
+      preview
+    };
+  }
+
+  const result = await collection.bulkWrite(operations);
+
+  return {
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+    requestedCount: Array.isArray(requestedActions) ? requestedActions.length : 0,
+    appliedActions,
+    preview
+  };
+}
+
 function registerIdAndLabelGroups(record, recordsById, idGroups, duplicateLabelGroups, issues) {
   if (!record.id) {
     issues.recordsMissingId.push(createRecordSummary(record));
@@ -776,7 +986,8 @@ function buildIntegrityReport(records) {
     cleanupPreviews: {
       dirtyRelationshipValues: createDirtyRelationshipValueCleanupPreview(records),
       staleChildReferences: createStaleChildReferenceCleanupPreview(records),
-      historicalInfoRelationshipFields: createHistoricalInfoRelationshipCleanupPreview(records)
+      historicalInfoRelationshipFields: createHistoricalInfoRelationshipCleanupPreview(records),
+      reciprocalRelationships: createReciprocalRelationshipRepairPreview(records)
     },
     issues
   };
@@ -1060,6 +1271,43 @@ app.post('/api/reference/historical-info-relationships/clean', async (req, res) 
     });
   } catch (err) {
     console.error('Error cleaning historical info relationship fields:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+
+// Preview-only endpoint for reciprocal relationship repair. This does not write anything.
+app.get('/api/reference/reciprocal-relationships/preview', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const records = await fetchReferenceRecordsForRelationshipRepair(collection);
+
+    res.json(createReciprocalRelationshipRepairPreview(records));
+  } catch (err) {
+    console.error('Error previewing reciprocal relationship repair:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Reviewed repair endpoint: applies selected reciprocal relationship resolutions.
+// Each selected row can either add the missing reciprocal ID or remove the asserted one-sided link.
+app.post('/api/reference/reciprocal-relationships/apply-reviewed', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const result = await applyReviewedReciprocalRelationshipActions(collection, req.body?.actions || []);
+
+    res.json({
+      success: true,
+      message: result.appliedActions.length === 0
+        ? 'No reviewed reciprocal relationship actions were applied.'
+        : `Applied ${result.appliedActions.length} reviewed reciprocal relationship action${result.appliedActions.length === 1 ? '' : 's'} across ${result.modifiedCount} record${result.modifiedCount === 1 ? '' : 's'}.`,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      appliedActions: result.appliedActions,
+      preview: result.preview
+    });
+  } catch (err) {
+    console.error('Error applying reviewed reciprocal relationship actions:', err);
     res.status(500).json({ error: err.toString() });
   }
 });

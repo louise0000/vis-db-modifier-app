@@ -1700,6 +1700,236 @@ This will also add the affected record IDs to the replacement parent's children 
 }
 
 
+
+function appendReciprocalRelationshipRepairPreview(container, preview) {
+    const section = document.createElement('div');
+    section.classList.add('integrity-section', 'reciprocal-relationship-repair-preview');
+
+    const heading = document.createElement('h3');
+    heading.textContent = `Reviewed Reciprocal Relationship Actions (${preview?.count || 0})`;
+    section.appendChild(heading);
+
+    const explanation = document.createElement('p');
+    explanation.textContent = 'These rows show one-sided relationships where both records still exist. For each row, either add the missing reciprocal link, remove the asserted one-sided link, or leave it untouched.';
+    section.appendChild(explanation);
+
+    if (!preview || preview.count === 0) {
+        const ok = document.createElement('p');
+        ok.textContent = 'No reciprocal relationship mismatches found.';
+        section.appendChild(ok);
+        container.appendChild(section);
+        return;
+    }
+
+    const selectedCountText = document.createElement('p');
+    selectedCountText.classList.add('integrity-help-text');
+
+    const controls = document.createElement('div');
+    controls.classList.add('reciprocal-review-controls');
+
+    const selectAllButton = createButton('Select all', 'integrity-secondary-button');
+    const clearAllButton = createButton('Clear all', 'integrity-secondary-button');
+    const setAllAddButton = createButton('Set selected to add reciprocal', 'integrity-secondary-button');
+    const setAllRemoveButton = createButton('Set selected to remove asserted link', 'integrity-secondary-button');
+
+    controls.appendChild(selectAllButton);
+    controls.appendChild(clearAllButton);
+    controls.appendChild(setAllAddButton);
+    controls.appendChild(setAllRemoveButton);
+    section.appendChild(controls);
+
+    const form = document.createElement('form');
+    form.classList.add('reciprocal-review-form');
+
+    const rowControls = [];
+
+    function createReviewRow(change, directionLabel) {
+        const row = document.createElement('div');
+        row.classList.add('reciprocal-review-row');
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = change.actionKey;
+        checkbox.classList.add('reciprocal-action-checkbox');
+
+        const select = document.createElement('select');
+        select.classList.add('reciprocal-action-select');
+
+        const addOption = document.createElement('option');
+        addOption.value = 'add-reciprocal';
+        addOption.textContent = change.addActionLabel || 'Add reciprocal link';
+        select.appendChild(addOption);
+
+        const removeOption = document.createElement('option');
+        removeOption.value = 'remove-asserted';
+        removeOption.textContent = change.removeActionLabel || 'Remove asserted one-sided link';
+        select.appendChild(removeOption);
+
+        const label = document.createElement('label');
+        label.classList.add('reciprocal-review-label');
+        label.appendChild(checkbox);
+
+        const text = document.createElement('span');
+        const childText = formatRecordSummary(change.child, { shortId: true });
+        const parentText = formatRecordSummary(change.parent, { shortId: true });
+
+        if (change.direction === 'add-child-to-parent') {
+            text.textContent = `${parentText} is missing child ${childText}`;
+        } else {
+            text.textContent = `${childText} is missing parent ${parentText}`;
+        }
+
+        label.appendChild(text);
+        row.appendChild(label);
+
+        const meta = document.createElement('p');
+        meta.classList.add('integrity-help-text');
+        meta.textContent = `${directionLabel}: ${change.explanation || ''}`;
+        row.appendChild(meta);
+
+        row.appendChild(select);
+
+        rowControls.push({ checkbox, select, change });
+        return row;
+    }
+
+    const childDetails = document.createElement('details');
+    childDetails.classList.add('integrity-group');
+    childDetails.open = true;
+
+    const childSummary = document.createElement('summary');
+    childSummary.textContent = `Child says parent exists; parent is missing child (${preview.addChildReferenceCount || 0})`;
+    childDetails.appendChild(childSummary);
+
+    if (Array.isArray(preview.addChildReferenceChanges) && preview.addChildReferenceChanges.length) {
+        preview.addChildReferenceChanges.forEach(change => {
+            childDetails.appendChild(createReviewRow(change, 'Default repair would add child ID to parent.children'));
+        });
+    } else {
+        const none = document.createElement('p');
+        none.textContent = 'No child IDs need adding to parent.children.';
+        childDetails.appendChild(none);
+    }
+
+    form.appendChild(childDetails);
+
+    const parentDetails = document.createElement('details');
+    parentDetails.classList.add('integrity-group');
+    parentDetails.open = true;
+
+    const parentSummary = document.createElement('summary');
+    parentSummary.textContent = `Parent says child exists; child is missing parent (${preview.addParentReferenceCount || 0})`;
+    parentDetails.appendChild(parentSummary);
+
+    if (Array.isArray(preview.addParentReferenceChanges) && preview.addParentReferenceChanges.length) {
+        preview.addParentReferenceChanges.forEach(change => {
+            parentDetails.appendChild(createReviewRow(change, 'Default repair would add parent ID to child.parentId'));
+        });
+    } else {
+        const none = document.createElement('p');
+        none.textContent = 'No parent IDs need adding to child.parentId.';
+        parentDetails.appendChild(none);
+    }
+
+    form.appendChild(parentDetails);
+    section.appendChild(form);
+
+    function updateSelectedCount() {
+        const selectedCount = rowControls.filter(row => row.checkbox.checked).length;
+        selectedCountText.textContent = `${selectedCount} of ${rowControls.length} reviewed action${rowControls.length === 1 ? '' : 's'} selected.`;
+    }
+
+    rowControls.forEach(row => {
+        row.checkbox.addEventListener('change', updateSelectedCount);
+    });
+
+    selectAllButton.addEventListener('click', () => {
+        rowControls.forEach(row => { row.checkbox.checked = true; });
+        updateSelectedCount();
+    });
+
+    clearAllButton.addEventListener('click', () => {
+        rowControls.forEach(row => { row.checkbox.checked = false; });
+        updateSelectedCount();
+    });
+
+    setAllAddButton.addEventListener('click', () => {
+        rowControls.forEach(row => {
+            if (row.checkbox.checked) row.select.value = 'add-reciprocal';
+        });
+    });
+
+    setAllRemoveButton.addEventListener('click', () => {
+        rowControls.forEach(row => {
+            if (row.checkbox.checked) row.select.value = 'remove-asserted';
+        });
+    });
+
+    section.appendChild(selectedCountText);
+    updateSelectedCount();
+
+    const rawDetails = document.createElement('details');
+    rawDetails.classList.add('integrity-group');
+    rawDetails.open = false;
+
+    const rawSummary = document.createElement('summary');
+    rawSummary.textContent = 'Raw reciprocal review preview JSON';
+    rawDetails.appendChild(rawSummary);
+
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(preview, null, 2);
+    rawDetails.appendChild(pre);
+    section.appendChild(rawDetails);
+
+    const applyButton = createButton('Apply Selected Reciprocal Actions', 'integrity-danger-button');
+    applyButton.addEventListener('click', async () => {
+        const actions = rowControls
+            .filter(row => row.checkbox.checked)
+            .map(row => ({
+                actionKey: row.change.actionKey,
+                resolution: row.select.value
+            }));
+
+        if (actions.length === 0) {
+            alert('Select at least one reciprocal relationship action first.');
+            return;
+        }
+
+        const removeCount = actions.filter(action => action.resolution === 'remove-asserted').length;
+        const addCount = actions.filter(action => action.resolution === 'add-reciprocal').length;
+        const confirmed = confirm(`Apply ${actions.length} selected reciprocal relationship action${actions.length === 1 ? '' : 's'}?\n\nAdd reciprocal link: ${addCount}\nRemove asserted one-sided link: ${removeCount}\n\nThis will only affect the selected rows.`);
+        if (!confirmed) return;
+
+        applyButton.disabled = true;
+        applyButton.textContent = 'Applying...';
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/reciprocal-relationships/apply-reviewed`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ actions })
+            });
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || 'Reviewed reciprocal action failed.');
+            }
+
+            alert(result.message || 'Reviewed reciprocal relationship actions applied.');
+            await rerunIntegrityReport();
+        } catch (error) {
+            console.error('Error applying reviewed reciprocal relationship actions:', error);
+            alert('Failed to apply reviewed reciprocal relationship actions. Check the server console for details.');
+            applyButton.disabled = false;
+            applyButton.textContent = 'Apply Selected Reciprocal Actions';
+        }
+    });
+
+    section.appendChild(applyButton);
+    container.appendChild(section);
+}
+
+
 function renderIntegrityReport(report) {
     const container = document.getElementById('integrity-report-results');
     container.innerHTML = '';
@@ -1746,6 +1976,11 @@ function renderIntegrityReport(report) {
     appendHistoricalInfoRelationshipCleanupPreview(
         container,
         report.cleanupPreviews?.historicalInfoRelationshipFields || { count: 0, removedFieldCount: 0, changes: [] }
+    );
+
+    appendReciprocalRelationshipRepairPreview(
+        container,
+        report.cleanupPreviews?.reciprocalRelationships || { count: 0, addChildReferenceCount: 0, addParentReferenceCount: 0, addChildReferenceChanges: [], addParentReferenceChanges: [] }
     );
 
     appendGroupedIntegritySection(

@@ -676,3 +676,47 @@ nav ul li a:hover {
 .historical-info-cleanup-preview {
     border-style: solid;
 }
+
+/* Reciprocal relationship repair */
+.reciprocal-relationship-repair-preview {
+    border-style: solid;
+}
+
+/* Reviewed reciprocal relationship actions */
+.reciprocal-review-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.reciprocal-review-form {
+    margin: 12px 0;
+}
+
+.reciprocal-review-row {
+    margin: 10px 0;
+    padding: 10px;
+    background: #ffffff99;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+}
+
+.reciprocal-review-label {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    font-weight: bold;
+}
+
+.reciprocal-review-label input {
+    margin-top: 3px;
+}
+
+.reciprocal-action-select {
+    margin-top: 8px;
+    padding: 6px;
+    border: 1px solid #00000022;
+    border-radius: 6px;
+    max-width: 100%;
+}
