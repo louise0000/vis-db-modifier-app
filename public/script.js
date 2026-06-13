@@ -1257,6 +1257,75 @@ function appendStaleChildReferenceCleanupPreview(container, preview) {
 }
 
 
+
+function appendHistoricalInfoRelationshipCleanupPreview(container, preview) {
+    const section = document.createElement('div');
+    section.classList.add('integrity-section', 'historical-info-cleanup-preview');
+
+    const heading = document.createElement('h3');
+    heading.textContent = `Historical Info Relationship Field Cleanup Preview (${preview?.count || 0})`;
+    section.appendChild(heading);
+
+    const explanation = document.createElement('p');
+    explanation.textContent = 'This narrow cleanup removes only duplicated shadow fields inside info.parentId and info.children. It does not alter root-level parentId / children arrays or any other info fields.';
+    section.appendChild(explanation);
+
+    if (!preview || !Array.isArray(preview.changes) || preview.changes.length === 0) {
+        const ok = document.createElement('p');
+        ok.textContent = 'No historical info relationship fields found.';
+        section.appendChild(ok);
+        container.appendChild(section);
+        return;
+    }
+
+    const details = document.createElement('details');
+    details.classList.add('integrity-group');
+    details.open = true;
+
+    const removedFieldCount = preview.removedFieldCount || 0;
+    const summary = document.createElement('summary');
+    summary.textContent = `Preview ${removedFieldCount} info shadow field${removedFieldCount === 1 ? '' : 's'} in ${preview.changes.length} record${preview.changes.length === 1 ? '' : 's'}`;
+    details.appendChild(summary);
+
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(preview.changes, null, 2);
+    details.appendChild(pre);
+    section.appendChild(details);
+
+    const cleanButton = createButton('Clean Historical Info Relationship Fields', 'integrity-danger-button');
+    cleanButton.addEventListener('click', async () => {
+        const confirmed = confirm('Remove historical info.parentId / info.children fields? This does not touch root-level parentId / children arrays.');
+        if (!confirmed) return;
+
+        cleanButton.disabled = true;
+        cleanButton.textContent = 'Cleaning...';
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/historical-info-relationships/clean`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || 'Cleanup failed.');
+            }
+
+            alert(result.message || 'Cleanup complete.');
+            await rerunIntegrityReport();
+        } catch (error) {
+            console.error('Error cleaning historical info relationship fields:', error);
+            alert('Failed to clean historical info relationship fields. Check the server console for details.');
+            cleanButton.disabled = false;
+            cleanButton.textContent = 'Clean Historical Info Relationship Fields';
+        }
+    });
+
+    section.appendChild(cleanButton);
+    container.appendChild(section);
+}
+
+
 function shortId(value) {
     const stringValue = String(value || '');
     if (stringValue.length <= 12) return stringValue;
@@ -1672,6 +1741,11 @@ function renderIntegrityReport(report) {
     appendStaleChildReferenceCleanupPreview(
         container,
         report.cleanupPreviews?.staleChildReferences || { count: 0, removedReferenceCount: 0, changes: [] }
+    );
+
+    appendHistoricalInfoRelationshipCleanupPreview(
+        container,
+        report.cleanupPreviews?.historicalInfoRelationshipFields || { count: 0, removedFieldCount: 0, changes: [] }
     );
 
     appendGroupedIntegritySection(

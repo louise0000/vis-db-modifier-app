@@ -671,3 +671,8 @@ nav ul li a:hover {
 .stale-child-cleanup-preview {
     border-style: solid;
 }
+
+/* Historical info.parentId / info.children cleanup */
+.historical-info-cleanup-preview {
+    border-style: solid;
+}

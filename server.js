@@ -546,6 +546,76 @@ async function applyStaleChildReferenceCleanup(collection) {
   };
 }
 
+
+function createHistoricalInfoRelationshipCleanupPreview(records) {
+  const changes = [];
+
+  records.forEach(record => {
+    if (!record.info || typeof record.info !== 'object') return;
+
+    const hasInfoParentId = Object.prototype.hasOwnProperty.call(record.info, 'parentId');
+    const hasInfoChildren = Object.prototype.hasOwnProperty.call(record.info, 'children');
+
+    if (!hasInfoParentId && !hasInfoChildren) return;
+
+    const removedInfoFields = {};
+    if (hasInfoParentId) removedInfoFields.parentId = record.info.parentId;
+    if (hasInfoChildren) removedInfoFields.children = record.info.children;
+
+    changes.push({
+      record: createRecordSummary(record),
+      rootRelationshipFields: {
+        parentId: Array.isArray(record.parentId) ? record.parentId : record.parentId,
+        children: Array.isArray(record.children) ? record.children : record.children
+      },
+      infoRelationshipFieldsToRemove: removedInfoFields
+    });
+  });
+
+  return {
+    count: changes.length,
+    removedFieldCount: changes.reduce((total, change) => total + Object.keys(change.infoRelationshipFieldsToRemove).length, 0),
+    changes
+  };
+}
+
+async function applyHistoricalInfoRelationshipCleanup(collection) {
+  const records = await collection.find({}, {
+    projection: {
+      _id: 0,
+      id: 1,
+      parentId: 1,
+      children: 1,
+      info: 1
+    }
+  }).toArray();
+
+  const preview = createHistoricalInfoRelationshipCleanupPreview(records);
+
+  if (preview.changes.length === 0) {
+    return { matchedCount: 0, modifiedCount: 0, preview };
+  }
+
+  const operations = preview.changes.map(change => ({
+    updateOne: {
+      filter: { id: change.record.id },
+      update: {
+        $unset: Object.fromEntries(
+          Object.keys(change.infoRelationshipFieldsToRemove).map(field => [`info.${field}`, ''])
+        )
+      }
+    }
+  }));
+
+  const result = await collection.bulkWrite(operations);
+
+  return {
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+    preview
+  };
+}
+
 function registerIdAndLabelGroups(record, recordsById, idGroups, duplicateLabelGroups, issues) {
   if (!record.id) {
     issues.recordsMissingId.push(createRecordSummary(record));
@@ -705,7 +775,8 @@ function buildIntegrityReport(records) {
     groupedDiagnostics: createGroupedIntegrityDiagnostics(issues),
     cleanupPreviews: {
       dirtyRelationshipValues: createDirtyRelationshipValueCleanupPreview(records),
-      staleChildReferences: createStaleChildReferenceCleanupPreview(records)
+      staleChildReferences: createStaleChildReferenceCleanupPreview(records),
+      historicalInfoRelationshipFields: createHistoricalInfoRelationshipCleanupPreview(records)
     },
     issues
   };
@@ -951,6 +1022,44 @@ app.post('/api/reference/stale-child-references/clean', async (req, res) => {
     });
   } catch (err) {
     console.error('Error cleaning stale child references:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+
+
+
+// Preview-only endpoint for historical info.parentId / info.children cleanup. This does not write anything.
+app.get('/api/reference/historical-info-relationships/preview', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const records = await fetchReferenceRecordsForRelationshipRepair(collection);
+
+    res.json(createHistoricalInfoRelationshipCleanupPreview(records));
+  } catch (err) {
+    console.error('Error previewing historical info relationship cleanup:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Narrow cleanup endpoint: removes only info.parentId and info.children shadow fields.
+// It does not alter root-level parentId / children arrays or any other info fields.
+app.post('/api/reference/historical-info-relationships/clean', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const result = await applyHistoricalInfoRelationshipCleanup(collection);
+
+    res.json({
+      success: true,
+      message: result.modifiedCount === 0
+        ? 'No historical info relationship fields needed cleaning.'
+        : `Removed ${result.preview.removedFieldCount} historical info relationship field${result.preview.removedFieldCount === 1 ? '' : 's'} from ${result.modifiedCount} record${result.modifiedCount === 1 ? '' : 's'}.`,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      preview: result.preview
+    });
+  } catch (err) {
+    console.error('Error cleaning historical info relationship fields:', err);
     res.status(500).json({ error: err.toString() });
   }
 });
