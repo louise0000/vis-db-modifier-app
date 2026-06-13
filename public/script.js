@@ -1246,7 +1246,7 @@ function appendMissingParentReplacementPreview(container, groups) {
     section.appendChild(heading);
 
     const explanation = document.createElement('p');
-    explanation.textContent = 'Choose a missing parent group by the affected records, search for the current surviving parent record, then preview the repair. This does not write anything yet.';
+    explanation.textContent = 'Choose a missing parent group by the affected records, search for the current surviving parent record, preview the repair, then apply it only after checking the affected records.';
     section.appendChild(explanation);
 
     const candidateGroups = (groups || []).filter(group => group.valueKind === 'missing-record-id');
@@ -1308,12 +1308,17 @@ function appendMissingParentReplacementPreview(container, groups) {
     previewButton.disabled = true;
     section.appendChild(previewButton);
 
+    const applyButton = createButton('Apply Reviewed Replacement', 'integrity-danger-button');
+    applyButton.disabled = true;
+    section.appendChild(applyButton);
+
     const previewResults = document.createElement('div');
     previewResults.classList.add('missing-parent-preview-results');
     section.appendChild(previewResults);
 
     let replacementId = null;
     let replacementSummary = null;
+    let lastPreview = null;
 
     function getSelectedGroup() {
         return candidateGroups.find(group => String(group.missingId) === missingSelect.value) || candidateGroups[0];
@@ -1353,8 +1358,10 @@ function appendMissingParentReplacementPreview(container, groups) {
         candidateResults.innerHTML = '';
         replacementId = null;
         replacementSummary = null;
+        lastPreview = null;
         selectedReplacement.textContent = 'No replacement selected.';
         previewButton.disabled = true;
+        applyButton.disabled = true;
         renderSelectedGroupContext();
     });
 
@@ -1365,8 +1372,10 @@ function appendMissingParentReplacementPreview(container, groups) {
         previewResults.innerHTML = '';
         replacementId = null;
         replacementSummary = null;
+        lastPreview = null;
         selectedReplacement.textContent = 'No replacement selected.';
         previewButton.disabled = true;
+        applyButton.disabled = true;
 
         if (!results.length) {
             candidateResults.textContent = 'No candidate records found.';
@@ -1384,6 +1393,8 @@ function appendMissingParentReplacementPreview(container, groups) {
                 replacementSummary = candidate;
                 selectedReplacement.textContent = `Selected replacement: ${formatRecordSummary(candidate, { shortId: true })}`;
                 previewButton.disabled = false;
+                applyButton.disabled = true;
+                lastPreview = null;
 
                 candidateResults.querySelectorAll('.candidate-result-button').forEach(button => {
                     button.classList.remove('selected');
@@ -1405,6 +1416,8 @@ function appendMissingParentReplacementPreview(container, groups) {
 
         candidateResults.textContent = 'Searching...';
         previewResults.innerHTML = '';
+        applyButton.disabled = true;
+        lastPreview = null;
 
         try {
             const response = await fetch(`${baseURL}/api/reference/missing-parent-replacement/candidates?query=${encodeURIComponent(query)}`);
@@ -1448,12 +1461,19 @@ function appendMissingParentReplacementPreview(container, groups) {
             }
 
             const preview = data.preview || {};
+            lastPreview = {
+                missingParentId,
+                replacementId,
+                replacementSummary,
+                preview
+            };
+            applyButton.disabled = Boolean(data.oldRecordStillExists) || !preview.affectedCount;
             previewResults.innerHTML = '';
 
             const warning = document.createElement('p');
             warning.textContent = data.oldRecordStillExists
                 ? 'Warning: the old parent ID still exists in the database, so this is not a simple missing-record repair.'
-                : 'Read-only preview. No database changes have been made.';
+                : 'Preview ready. No database changes have been made yet.';
             previewResults.appendChild(warning);
 
             const summary = document.createElement('p');
@@ -1464,7 +1484,7 @@ function appendMissingParentReplacementPreview(container, groups) {
             const addCount = Array.isArray(preview.childIdsToAddToReplacement)
                 ? preview.childIdsToAddToReplacement.length
                 : 0;
-            childrenSummary.textContent = `Replacement record would gain ${addCount} child reference${addCount === 1 ? '' : 's'} if this were applied later.`;
+            childrenSummary.textContent = `Replacement record would gain ${addCount} child reference${addCount === 1 ? '' : 's'} if this is applied.`;
             previewResults.appendChild(childrenSummary);
 
             if (Array.isArray(preview.changes) && preview.changes.length) {
@@ -1489,6 +1509,52 @@ function appendMissingParentReplacementPreview(container, groups) {
         } catch (error) {
             console.error('Error building replacement preview:', error);
             previewResults.textContent = 'Replacement preview failed. Check the server console.';
+            applyButton.disabled = true;
+            lastPreview = null;
+        }
+    });
+
+    applyButton.addEventListener('click', async () => {
+        if (!lastPreview || !replacementId) {
+            alert('Preview the replacement before applying it.');
+            return;
+        }
+
+        const affectedCount = lastPreview.preview?.affectedCount || 0;
+        const replacementLabel = lastPreview.replacementSummary?.label || lastPreview.preview?.replacement?.label || replacementId;
+        const confirmed = confirm(`Apply this missing-parent replacement?
+
+${affectedCount} affected record${affectedCount === 1 ? '' : 's'} will replace the missing parent ID with: ${replacementLabel}.
+
+This will also add the affected record IDs to the replacement parent's children array.`);
+
+        if (!confirmed) return;
+
+        applyButton.disabled = true;
+        applyButton.textContent = 'Applying...';
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/missing-parent-replacement/apply`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    missingParentId: lastPreview.missingParentId,
+                    replacementId: lastPreview.replacementId
+                })
+            });
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || 'Apply failed.');
+            }
+
+            alert(result.message || 'Missing-parent replacement applied.');
+            await rerunIntegrityReport();
+        } catch (error) {
+            console.error('Error applying missing-parent replacement:', error);
+            alert('Failed to apply missing-parent replacement. Check the server console for details.');
+            applyButton.disabled = false;
+            applyButton.textContent = 'Apply Reviewed Replacement';
         }
     });
 

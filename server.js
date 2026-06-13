@@ -688,6 +688,89 @@ function createMissingParentReplacementPreview(records, missingParentId, replace
   };
 }
 
+async function fetchReferenceRecordsForRelationshipRepair(collection) {
+  return collection.find({}, {
+    projection: {
+      _id: 0,
+      id: 1,
+      parentId: 1,
+      children: 1,
+      info: 1
+    }
+  }).toArray();
+}
+
+function validateMissingParentReplacementRequest(missingParentId, replacementId) {
+  if (!missingParentId || !replacementId) {
+    return 'Both missingParentId and replacementId are required.';
+  }
+
+  if (isDirtyRelationshipValue(missingParentId) || isDirtyRelationshipValue(replacementId)) {
+    return 'Dirty relationship values cannot be used for missing-parent replacement.';
+  }
+
+  if (missingParentId === replacementId) {
+    return 'The missing parent ID and replacement ID must be different.';
+  }
+
+  return null;
+}
+
+async function applyMissingParentReplacement(collection, missingParentId, replacementId) {
+  const records = await fetchReferenceRecordsForRelationshipRepair(collection);
+  const replacementRecord = records.find(record => record.id === replacementId);
+
+  if (!replacementRecord) {
+    const error = new Error('Replacement record not found.');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const oldRecordStillExists = records.some(record => record.id === missingParentId);
+  if (oldRecordStillExists) {
+    const error = new Error('The old parent ID still exists. Use a merge workflow instead of missing-parent replacement.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const preview = createMissingParentReplacementPreview(records, missingParentId, replacementRecord);
+
+  if (preview.affectedCount === 0) {
+    const error = new Error('No records currently reference this missing parent ID.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const childUpdateOperations = preview.changes.map(change => ({
+    updateOne: {
+      filter: { id: change.record.id },
+      update: { $set: { parentId: change.parentId.after } }
+    }
+  }));
+
+  const operations = [...childUpdateOperations];
+
+  if (preview.childIdsToAddToReplacement.length > 0) {
+    operations.push({
+      updateOne: {
+        filter: { id: replacementId },
+        update: { $addToSet: { children: { $each: preview.childIdsToAddToReplacement } } }
+      }
+    });
+  }
+
+  const writeResult = operations.length > 0
+    ? await collection.bulkWrite(operations)
+    : { matchedCount: 0, modifiedCount: 0 };
+
+  return {
+    oldRecordStillExists,
+    preview,
+    matchedCount: writeResult.matchedCount || 0,
+    modifiedCount: writeResult.modifiedCount || 0
+  };
+}
+
 function createReplacementCandidateSummary(result) {
   const item = result.item || result;
 
@@ -812,29 +895,13 @@ app.get('/api/reference/missing-parent-replacement/preview', async (req, res) =>
     const missingParentId = String(req.query.missingParentId || '').trim();
     const replacementId = String(req.query.replacementId || '').trim();
 
-    if (!missingParentId || !replacementId) {
-      return res.status(400).json({ error: 'Both missingParentId and replacementId are required.' });
-    }
-
-    if (isDirtyRelationshipValue(missingParentId) || isDirtyRelationshipValue(replacementId)) {
-      return res.status(400).json({ error: 'Dirty relationship values cannot be used for replacement preview.' });
-    }
-
-    if (missingParentId === replacementId) {
-      return res.status(400).json({ error: 'The missing parent ID and replacement ID must be different.' });
+    const validationError = validateMissingParentReplacementRequest(missingParentId, replacementId);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
     }
 
     const collection = db.collection('reference');
-    const records = await collection.find({}, {
-      projection: {
-        _id: 0,
-        id: 1,
-        parentId: 1,
-        children: 1,
-        info: 1
-      }
-    }).toArray();
-
+    const records = await fetchReferenceRecordsForRelationshipRepair(collection);
     const replacementRecord = records.find(record => record.id === replacementId);
 
     if (!replacementRecord) {
@@ -854,6 +921,35 @@ app.get('/api/reference/missing-parent-replacement/preview', async (req, res) =>
   }
 });
 
+
+
+
+// Apply a reviewed missing-parent replacement.
+// This is intentionally narrow: it only replaces one missing parent ID in affected child parentId arrays
+// and adds those child IDs to the chosen replacement parent's children array.
+app.post('/api/reference/missing-parent-replacement/apply', async (req, res) => {
+  try {
+    const missingParentId = String(req.body?.missingParentId || '').trim();
+    const replacementId = String(req.body?.replacementId || '').trim();
+
+    const validationError = validateMissingParentReplacementRequest(missingParentId, replacementId);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
+    }
+
+    const collection = db.collection('reference');
+    const result = await applyMissingParentReplacement(collection, missingParentId, replacementId);
+
+    res.json({
+      success: true,
+      message: `Applied missing-parent replacement for ${result.preview.affectedCount} affected record${result.preview.affectedCount === 1 ? '' : 's'}.`,
+      ...result
+    });
+  } catch (err) {
+    console.error('Error applying missing-parent replacement:', err);
+    res.status(err.statusCode || 500).json({ error: err.toString() });
+  }
+});
 
 
 //search for full record of selected duplicates

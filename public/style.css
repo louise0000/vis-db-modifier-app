@@ -654,3 +654,13 @@ nav ul li a:hover {
     font-size: 13px;
     opacity: 0.8;
 }
+
+
+.missing-parent-preview-section .integrity-danger-button {
+    display: inline-block;
+    margin-left: 8px;
+}
+
+.missing-parent-preview-results p:first-child {
+    font-weight: bold;
+}
