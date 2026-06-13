@@ -1036,6 +1036,108 @@ document.getElementById('delete-selected-records').addEventListener('click', asy
 
 
 
+
+
+// ========== Read-only integrity report ==========
+
+function humaniseIntegrityKey(key) {
+    return key
+        .replace(/([A-Z])/g, ' $1')
+        .replace(/^./, char => char.toUpperCase());
+}
+
+function appendIntegritySection(container, title, items) {
+    const section = document.createElement('div');
+    section.classList.add('integrity-section');
+
+    const heading = document.createElement('h3');
+    heading.textContent = `${title} (${items.length})`;
+    section.appendChild(heading);
+
+    if (!items.length) {
+        const ok = document.createElement('p');
+        ok.textContent = 'No issues found.';
+        section.appendChild(ok);
+    } else {
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(items, null, 2);
+        section.appendChild(pre);
+    }
+
+    container.appendChild(section);
+}
+
+function renderIntegrityReport(report) {
+    const container = document.getElementById('integrity-report-results');
+    container.innerHTML = '';
+
+    const meta = document.createElement('p');
+    meta.textContent = `Checked ${report.totalRecords} records at ${report.generatedAt}.`;
+    container.appendChild(meta);
+
+    const summaryWrapper = document.createElement('div');
+    summaryWrapper.classList.add('integrity-summary');
+
+    Object.entries(report.summary || {}).forEach(([key, count]) => {
+        const card = document.createElement('div');
+        card.classList.add('integrity-summary-card');
+
+        const number = document.createElement('strong');
+        number.textContent = count;
+
+        const label = document.createElement('span');
+        label.textContent = humaniseIntegrityKey(key);
+
+        card.appendChild(number);
+        card.appendChild(label);
+        summaryWrapper.appendChild(card);
+    });
+
+    container.appendChild(summaryWrapper);
+
+    const issueOrder = [
+        'recordsMissingId',
+        'duplicateIds',
+        'missingParentIdField',
+        'malformedParentId',
+        'missingChildrenField',
+        'malformedChildren',
+        'parentIdsPointingNowhere',
+        'childrenIdsPointingNowhere',
+        'childParentNotReciprocated',
+        'parentChildNotReciprocated',
+        'duplicateLabelsByType',
+        'historicalInfoRelationshipFields'
+    ];
+
+    issueOrder.forEach(key => {
+        appendIntegritySection(container, humaniseIntegrityKey(key), report.issues?.[key] || []);
+    });
+}
+
+const integrityButton = document.getElementById('run-integrity-report');
+if (integrityButton) {
+    integrityButton.addEventListener('click', async () => {
+        const container = document.getElementById('integrity-report-results');
+        container.textContent = 'Running integrity report...';
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/integrity-report`);
+            const report = await response.json();
+
+            if (!response.ok) {
+                throw new Error(report.error || 'Failed to run integrity report.');
+            }
+
+            renderIntegrityReport(report);
+        } catch (error) {
+            console.error('Error running integrity report:', error);
+            container.textContent = 'Failed to run integrity report. Check the server console for details.';
+        }
+    });
+}
+
+
 //handle visual scrolling
 document.querySelectorAll('nav a').forEach(anchor => {
     anchor.addEventListener('click', function (e) {
@@ -1043,21 +1145,18 @@ document.querySelectorAll('nav a').forEach(anchor => {
 
         const targetId = this.getAttribute('href');
         const contentWrapper = document.querySelector('.content-wrapper');
+        const sectionTransforms = {
+            '#section-1': 'translateX(0)',
+            '#section-2': 'translateX(-16.6667%)',
+            '#section-3': 'translateX(-33.3333%)',
+            '#section-4': 'translateX(-50%)',
+            '#section-5': 'translateX(-66.6667%)',
+            '#section-6': 'translateX(-83.3333%)'
+        };
 
-        if (targetId === '#section-1') {
-            contentWrapper.style.transform = 'translateX(0)';
-        } else if (targetId === '#section-2') {
-            contentWrapper.style.transform = 'translateX(-20%)';
-        } else if (targetId === '#section-3') {
-            contentWrapper.style.transform = 'translateX(-40%)';
+        if (sectionTransforms[targetId]) {
+            contentWrapper.style.transform = sectionTransforms[targetId];
+            window.history.pushState({}, '', targetId); // Update the URL without jumping
         }
-        else if (targetId === '#section-4') {
-            contentWrapper.style.transform = 'translateX(-60%)';
-        }
-        else if (targetId === '#section-5') {
-            contentWrapper.style.transform = 'translateX(-80%)';
-        }
-
-        window.history.pushState({}, '', targetId); // Update the URL without jumping
     });
 });

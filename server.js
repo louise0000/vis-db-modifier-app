@@ -281,6 +281,214 @@ app.get('/api/reference/duplicates/:label', async (req, res) => {
   }
 });
 
+
+function createRecordSummary(record) {
+  return {
+    id: record.id || null,
+    label: record.info?.label || null,
+    type: record.info?.type || null
+  };
+}
+
+function normaliseLabelForIntegrity(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function relationshipArrayIssue(record, field) {
+  if (!Object.prototype.hasOwnProperty.call(record, field)) {
+    return {
+      record: createRecordSummary(record),
+      field,
+      valueType: 'missing'
+    };
+  }
+
+  if (!Array.isArray(record[field])) {
+    return {
+      record: createRecordSummary(record),
+      field,
+      valueType: typeof record[field],
+      value: record[field]
+    };
+  }
+
+  return null;
+}
+
+function buildIntegrityReport(records) {
+  const recordsById = new Map();
+  const idGroups = new Map();
+  const duplicateLabelGroups = new Map();
+
+  const issues = {
+    recordsMissingId: [],
+    duplicateIds: [],
+    missingParentIdField: [],
+    malformedParentId: [],
+    missingChildrenField: [],
+    malformedChildren: [],
+    parentIdsPointingNowhere: [],
+    childrenIdsPointingNowhere: [],
+    childParentNotReciprocated: [],
+    parentChildNotReciprocated: [],
+    duplicateLabelsByType: [],
+    historicalInfoRelationshipFields: []
+  };
+
+  records.forEach(record => {
+    if (!record.id) {
+      issues.recordsMissingId.push(createRecordSummary(record));
+    } else {
+      if (!idGroups.has(record.id)) idGroups.set(record.id, []);
+      idGroups.get(record.id).push(record);
+
+      // First one wins for lookup purposes; duplicate IDs are reported separately.
+      if (!recordsById.has(record.id)) {
+        recordsById.set(record.id, record);
+      }
+    }
+
+    const labelKey = normaliseLabelForIntegrity(record.info?.label);
+    if (labelKey) {
+      const typeKey = normaliseLabelForIntegrity(record.info?.type || 'unknown');
+      const groupKey = `${typeKey}::${labelKey}`;
+      if (!duplicateLabelGroups.has(groupKey)) {
+        duplicateLabelGroups.set(groupKey, {
+          label: record.info?.label || '',
+          type: record.info?.type || 'unknown',
+          records: []
+        });
+      }
+      duplicateLabelGroups.get(groupKey).records.push(createRecordSummary(record));
+    }
+
+    if (record.info && (Object.prototype.hasOwnProperty.call(record.info, 'parentId') || Object.prototype.hasOwnProperty.call(record.info, 'children'))) {
+      issues.historicalInfoRelationshipFields.push({
+        record: createRecordSummary(record),
+        hasInfoParentId: Object.prototype.hasOwnProperty.call(record.info, 'parentId'),
+        hasInfoChildren: Object.prototype.hasOwnProperty.call(record.info, 'children')
+      });
+    }
+
+    const parentIssue = relationshipArrayIssue(record, 'parentId');
+    if (parentIssue?.valueType === 'missing') {
+      issues.missingParentIdField.push(parentIssue);
+    } else if (parentIssue) {
+      issues.malformedParentId.push(parentIssue);
+    }
+
+    const childrenIssue = relationshipArrayIssue(record, 'children');
+    if (childrenIssue?.valueType === 'missing') {
+      issues.missingChildrenField.push(childrenIssue);
+    } else if (childrenIssue) {
+      issues.malformedChildren.push(childrenIssue);
+    }
+  });
+
+  idGroups.forEach((group, id) => {
+    if (group.length > 1) {
+      issues.duplicateIds.push({
+        id,
+        count: group.length,
+        records: group.map(createRecordSummary)
+      });
+    }
+  });
+
+  duplicateLabelGroups.forEach(group => {
+    if (group.records.length > 1) {
+      issues.duplicateLabelsByType.push({
+        label: group.label,
+        type: group.type,
+        count: group.records.length,
+        records: group.records
+      });
+    }
+  });
+
+  records.forEach(record => {
+    const recordSummary = createRecordSummary(record);
+
+    if (Array.isArray(record.parentId)) {
+      record.parentId.forEach(parentId => {
+        const parent = recordsById.get(parentId);
+        if (!parent) {
+          issues.parentIdsPointingNowhere.push({
+            record: recordSummary,
+            missingParentId: parentId
+          });
+          return;
+        }
+
+        if (!Array.isArray(parent.children) || !parent.children.includes(record.id)) {
+          issues.childParentNotReciprocated.push({
+            child: recordSummary,
+            parent: createRecordSummary(parent),
+            relationship: `${record.id} lists parent ${parentId}, but parent does not list child`
+          });
+        }
+      });
+    }
+
+    if (Array.isArray(record.children)) {
+      record.children.forEach(childId => {
+        const child = recordsById.get(childId);
+        if (!child) {
+          issues.childrenIdsPointingNowhere.push({
+            record: recordSummary,
+            missingChildId: childId
+          });
+          return;
+        }
+
+        if (!Array.isArray(child.parentId) || !child.parentId.includes(record.id)) {
+          issues.parentChildNotReciprocated.push({
+            parent: recordSummary,
+            child: createRecordSummary(child),
+            relationship: `${record.id} lists child ${childId}, but child does not list parent`
+          });
+        }
+      });
+    }
+  });
+
+  const summary = Object.fromEntries(
+    Object.entries(issues).map(([key, value]) => [key, value.length])
+  );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totalRecords: records.length,
+    summary,
+    issues
+  };
+}
+
+// Read-only integrity report. This route does not write, repair, merge, or delete anything.
+app.get('/api/reference/integrity-report', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const records = await collection.find({}, {
+      projection: {
+        _id: 0,
+        id: 1,
+        parentId: 1,
+        children: 1,
+        info: 1
+      }
+    }).toArray();
+
+    res.json(buildIntegrityReport(records));
+  } catch (err) {
+    console.error('Error building integrity report:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+
 //search for full record of selected duplicates
 app.get('/api/reference/:id', async (req, res) => {
   try {

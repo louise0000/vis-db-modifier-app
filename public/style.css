@@ -121,7 +121,7 @@ nav {
 .content-wrapper {
     display: flex;
     overflow-y: auto; /* Scroll if content overflows */
-    width: 500%; /* Correct for four sections */
+    width: 600%; /* Six horizontal sections */
     transition: transform 0.5s ease;
     margin-top: calc(40px + 2em + 20px + 2em);
     height: calc(100vh - (40px + 2em + 20px + 2em));
@@ -129,7 +129,7 @@ nav {
 
 /* Each content section takes up one-third of the wrapper's width */
 .content-section {
-    flex: 0 0 20%; /* Each section now takes 25% of the content-wrapper width */
+    flex: 0 0 16.6667%; /* Six sections: each section is one viewport wide */
     padding: 20px;
     box-sizing: border-box;
     height: 100%; /* Full height of content wrapper */
@@ -153,6 +153,9 @@ nav {
 #section-5 {
     background-color: #ffc978; /* Pale yellow */
 }
+#section-6 {
+    background-color: #d7efff;
+}
 
 /* Adjust the transform slightly */
 #section-1:target ~ .content-wrapper {
@@ -160,18 +163,21 @@ nav {
 }
 
 #section-2:target ~ .content-wrapper {
-    transform: translateX(-20%); /* Slightly adjust to account for potential rounding errors */
+    transform: translateX(-16.6667%);
 }
 
 #section-3:target ~ .content-wrapper {
-    transform: translateX(-40%);
+    transform: translateX(-33.3333%);
 }
 
 #section-4:target ~ .content-wrapper {
-    transform: translateX(-60%);
+    transform: translateX(-50%);
 }
 #section-5:target ~ .content-wrapper {
-    transform: translateX(-80%);
+    transform: translateX(-66.6667%);
+}
+#section-6:target ~ .content-wrapper {
+    transform: translateX(-83.3333%);
 }
 
 /* Wrapper for the search sections */
@@ -433,4 +439,64 @@ nav ul li a:hover {
     border: 1px solid #c6ea45;
     font-family: inherit;
     vertical-align: top;
+}
+
+
+/* Read-only integrity report */
+#run-integrity-report {
+    margin: 20px 0;
+    padding: 10px 20px;
+    font-size: 16px;
+    background-color: #333;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+#run-integrity-report:hover {
+    background-color: #555;
+}
+
+.integrity-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 20px 0;
+}
+
+.integrity-summary-card {
+    background: #ffffffaa;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+    padding: 10px;
+    min-width: 180px;
+}
+
+.integrity-summary-card strong {
+    display: block;
+    font-size: 22px;
+}
+
+.integrity-section {
+    margin: 18px 0;
+    padding: 12px;
+    background: #ffffff77;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+}
+
+.integrity-section h3 {
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.integrity-section pre {
+    white-space: pre-wrap;
+    max-height: 45vh;
+    overflow: auto;
+    background: #ffffffaa;
+    padding: 10px;
+    border-radius: 6px;
+    font-size: 12px;
 }
