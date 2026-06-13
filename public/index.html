@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Database Maintenance Interface</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>Database Maintenance Interface</h1>
+
+  <!-- Navigation Bar -->
+  <nav>
+    <ul>
+      <li><a href="#section-1">Connect People to Works</a></li>
+      <li><a href="#section-2">Duplicates</a></li>
+      <li><a href="#section-3">Search and Edit Records</a></li>
+      <li><a href="#section-4">Add Single Record</a></li>
+      <li><a href="#section-5">Delete Single Record</a></li>
+    </ul>
+  </nav>
+
+  <!-- Wrapper for all sections -->
+  <div class="content-wrapper">
+    <!-- Section 1: Existing Interface -->
+    <div id="section-1" class="content-section">
+      <div class="search-sections-wrapper">
+        <!-- Theorist or Artist Search Section -->
+        <div class="search-section theorist-section">
+          <h3>Search Theorist or Artist</h3>
+          <input type="text" id="query-theorist-artist" placeholder="Enter Label">
+          <button id="query-button-theorist-artist">Query</button>
+          <pre id="result-theorist-artist"></pre>
+        </div>
+    
+        <!-- ArtworkBook Search Section -->
+        <div class="search-section artwork-section">
+          <h3>Search ArtworkBook</h3>
+          <input type="text" id="query-artworkbook" placeholder="Enter Label">
+          <button id="query-button-artworkbook">Query</button>
+          <button id="query-button-orphans">Search for All Orphans</button>
+          <pre id="result-artworkbook"></pre>
+        </div>
+      </div>
+    
+      <!-- Confirm Selection Button -->
+      <button id="confirm-selection">Confirm Selection</button>
+    </div>
+    
+
+    <!-- Section 2: Placeholder Section 2 -->
+    <div id="section-2" class="content-section">
+      <h3>Find and consolidate duplicates</h3>
+      
+      <div id="duplicate-checker">
+        <button id="check-duplicates">Check for Duplicates</button>
+        <pre id="duplicate-results"></pre>
+        <button id="compare-duplicates" disabled>Compare</button>
+      </div>
+      
+      <!-- Placeholder for displaying duplicates of a selected label -->
+      <div id="duplicate-entry-details"></div>
+      
+      
+      
+    </div>
+
+    <!-- Section 3: Placeholder Section 3 -->
+    <div id="section-3" class="content-section">
+      <h2>Search and Edit Records</h2>
+      <div class="search-edit-section">
+          <input type="text" id="query-all" placeholder="Enter search term...">
+          <button id="query-button-all">Search</button>
+          <div id="result-all"></div>
+      </div>
+      <div id="edit-section" style="display:none;">
+          <h3>Edit Record</h3>
+          <div id="edit-record"></div>
+          <button id="save-edits" style="display:none;">Save Changes</button>
+      </div>
+    </div>
+
+    <!-- Section 4: Placeholder Section 4 -->
+    <div id="section-4" class="content-section">
+      <h2>Interface for adding individual records</h2>
+      <p>(Use command line and JSON for mass updates)</p>
+      
+      <!-- Dropdown to select the record type -->
+      <div class="add-record-section">
+        <label for="type-select">Select Type:</label>
+        <select id="type-select">
+          <option value="">--Select a Type--</option>
+          <!-- Options will be populated dynamically -->
+        </select>
+      </div>
+
+      <!-- Placeholder for the dynamic form -->
+      <div id="record-form" style="display:none;">
+        <h3>Create New Record</h3>
+        <form id="new-record-form">
+          <!-- Form fields will be generated dynamically -->
+          <div id="form-fields"></div>
+          <button type="submit">Add Record</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Section 5: Placeholder Section 4 -->
+    <div id="section-5" class="content-section">
+      <h2>Search and delete individual records</h2>
+      <div class="search-delete-section">
+          <input type="text" id="query-delete" placeholder="Enter search term...">
+          <button id="query-button-delete">Search</button>
+          <div id="result-delete"></div>
+          <button id="delete-selected-records" style="display:none;">Delete Selected</button>
+      </div>
+    </div>
+    
+
+
+
+  </div>
+
+
+
+
+  <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,420 @@
+/* reset */
+
+html {
+    box-sizing: border-box;
+    font-size: 16px;
+  }
+  
+  *, *:before, *:after {
+    box-sizing: inherit;
+  }
+  
+  body, h1, h2, h3, h4, h5, h6, p, ol, ul {
+    margin: 0;
+    padding: 0;
+    font-weight: normal;
+  }
+  
+  ol, ul {
+    list-style: none;
+  }
+  
+  img {
+    max-width: 100%;
+    height: auto;
+  }
+
+
+body, html {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    font-family: "Akzidenz Grotesk BQ Medium", -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+/* Ensure body takes full height */
+body {
+    display: flex;
+    flex-direction: column;
+}
+
+.custom-select {
+    border: 1px solid #ca00ca11;
+    padding: 5px 0;
+    max-width: 45vw;
+    overflow-y: scroll;
+    background: #00000011;    
+    border-top: none;
+}
+
+#section-2 .custom-select{
+    background: #a9ecbc;
+}
+
+#section-3 .custom-select{
+    background: #f6a7fb;
+}
+  
+.custom-option {
+    padding: 5px;
+    cursor: pointer;
+    font-size: 10px;
+}
+
+.custom-option.selected {
+    background-color: #00000018;
+}
+
+  
+#section-3 .custom-option.selected {
+    background-color: #ca00ca22;
+}
+
+#section-2 .custom-option.selected {
+    background-color: #3faa7f42;
+}
+
+.search-edit-section input{
+  width: 45vw;
+  padding: 10px;
+  border-radius: 10px 10px 0px 0px;
+  margin-top: 10px;
+  border: 1px solid #00000018;
+}
+
+#section-3 .search-edit-section input{
+    border: 1px solid #ca00ca55;
+}
+
+#section-2 .search-edit-section input{
+    border: 1px solid #3faa7f22;
+}
+
+
+
+/* h1 Styling */
+h1 {
+    margin: 0;
+    padding: 20px;
+    text-align: center;
+    background-color: #f1f1f1;
+    position: fixed;
+    width: 100%;
+    top: 0;
+    z-index: 1001; /* Ensure h1 is above everything else */
+}
+
+/* Navigation Bar */
+nav {
+    background-color: #f8f9fa;
+    padding: 10px;
+    width: 100%;
+    z-index: 1000; /* Ensure nav is above other content */
+    position: fixed;
+    top: calc(50px + 2em); /* Position just below h1; calculated height */
+}
+
+/* Wrapper for all sections */
+.content-wrapper {
+    display: flex;
+    overflow-y: auto; /* Scroll if content overflows */
+    width: 500%; /* Correct for four sections */
+    transition: transform 0.5s ease;
+    margin-top: calc(40px + 2em + 20px + 2em);
+    height: calc(100vh - (40px + 2em + 20px + 2em));
+}
+
+/* Each content section takes up one-third of the wrapper's width */
+.content-section {
+    flex: 0 0 20%; /* Each section now takes 25% of the content-wrapper width */
+    padding: 20px;
+    box-sizing: border-box;
+    height: 100%; /* Full height of content wrapper */
+}
+
+#section-1 {
+    background-color: #d7c1fe; /* Candy pink */
+}
+
+#section-2 {
+    background-color: #c0f7d0; /* Mint green */
+}
+
+#section-3 {
+    background-color: #fac2f8; /* Pale yellow */
+}
+
+#section-4 {
+    background-color: #f6ff92; /* Pale yellow */
+}
+#section-5 {
+    background-color: #ffc978; /* Pale yellow */
+}
+
+/* Adjust the transform slightly */
+#section-1:target ~ .content-wrapper {
+    transform: translateX(0);
+}
+
+#section-2:target ~ .content-wrapper {
+    transform: translateX(-20%); /* Slightly adjust to account for potential rounding errors */
+}
+
+#section-3:target ~ .content-wrapper {
+    transform: translateX(-40%);
+}
+
+#section-4:target ~ .content-wrapper {
+    transform: translateX(-60%);
+}
+#section-5:target ~ .content-wrapper {
+    transform: translateX(-80%);
+}
+
+/* Wrapper for the search sections */
+.search-sections-wrapper {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px; /* Space between the two sections */
+    margin-bottom: 20px; /* Space below the search sections and the confirm button */
+}
+
+/* Individual search sections */
+.search-section {
+    flex: 1;
+}
+
+/* Theorist section specific styling */
+.theorist-section {
+    background-color: #f0f8ff; /* Light blue background */
+    padding: 20px;
+    border-radius: 8px;
+}
+
+/* Artwork section specific styling */
+.artwork-section {
+    background-color: #fff0f5; /* Light pink background */
+    padding: 20px;
+    border-radius: 8px;
+}
+
+/* Confirm Selection Button */
+#confirm-selection {
+    margin-top: 20px;
+    padding: 10px 20px;
+    font-size: 16px;
+    background-color: #333;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+#confirm-selection:hover {
+    background-color: #555;
+}
+
+
+/* Default to section-1 if no section is targeted */
+body:not(:target) #section-1 ~ .content-wrapper {
+    transform: translateX(0);
+}
+
+/* Navigation Styling */
+nav ul {
+    list-style-type: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    justify-content: space-around;
+}
+
+nav ul li {
+    display: inline;
+}
+
+nav ul li a {
+    text-decoration: none;
+    padding: 10px 20px;
+    color: #333;
+    font-weight: bold;
+}
+
+nav ul li a:hover {
+    background-color: #ddd;
+    border-radius: 5px;
+}
+
+/* Ensuring overflow scroll */
+.content-section {
+    height: 100%;
+    overflow-x:hidden;
+    width: 100vw;
+    overflow-y: auto; /* Scroll if section content overflows */
+}
+
+
+/* Add this to style.css */
+
+/* Wrapper for side-by-side comparison */
+.comparison-wrapper {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px;
+    gap: 20px;
+}
+
+/* Styling for individual comparison records */
+.comparison-record {
+    flex: 0 0 90%; /* Each record takes up almost half the space */
+    background-color: #f9f9f9;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+}
+
+/* Styling for the ul and li elements */
+.comparison-record ul {
+    list-style-type: none;
+    padding-left: 0;
+}
+
+.comparison-record li {
+    margin-bottom: 10px;
+}
+
+.comparison-record li ul li {
+    margin-bottom: 0;
+}
+
+.flex-container {
+    display: flex;
+    gap: 20px; /* Optional: add some space between the comparison sections */
+}
+
+.comparison-wrapper {
+    flex: 1; /* Make each comparison section take up an equal amount of space */
+    padding: 10px; /* Optional: add some padding */
+    border: 1px solid #ccc; /* Optional: add a border for better separation */
+}
+
+/* Styles for the second order <ul> */
+.comparison-wrapper ul ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px; /* Add space between the key and value pairs */
+    list-style-type: none; /* Remove the bullet points */
+    padding: 0;
+    margin: 0 0 10px 0; /* Optional: adjust margin for better spacing */
+}
+
+.comparison-wrapper ul{
+    flex:35;
+    max-width: 90%;
+}
+.comparison-wrapper input{
+    flex:1;
+}
+
+/* Style for the key-value pair items */
+.comparison-wrapper ul ul li {
+    flex: 3; /* Distribute space evenly between key and value */
+}
+
+.comparison-wrapper ul ul li:first-child {
+    font-weight: bold; /* Make the key bold */
+    flex:1;
+}
+
+/* Existing styles */
+
+/* Add new styles for search and edit section */
+.search-edit-section {
+    margin-bottom: 20px;
+}
+
+#edit-section {
+    margin-top: 20px;
+}
+
+#edit-record ul {
+    list-style-type: none;
+    width: 75vw;
+    margin-top: 20px;
+    border: 1px solid rgb(206, 206, 206);
+    padding: 10px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+}
+
+#edit-record li {
+    margin-bottom: 10px;
+    display: flex;
+}
+
+#edit-record li strong{
+    flex: 1;
+}
+#edit-record li span{
+    flex: 5;
+}
+
+#edit-record li span {
+    display: inline-block;
+    padding: 5px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background-color: #fff;
+}
+
+#edit-note {
+    min-height: 100px; /* Example height */
+    white-space: pre-wrap; /* Allows for line breaks */
+}
+
+#form-fields{
+    margin: 20px 0;
+}
+
+#form-fields label{
+    display: inline-block;
+    width: 20%;
+}
+
+#form-fields label span{
+    font-size: 12px;
+}
+
+#form-fields input{
+    width: 80%;
+    margin-bottom: 10px;
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid #c6ea45;
+}
+
+#record-form h3{
+    max-width: 10px 0;
+}
+
+.add-record-section{
+    margin: 10px 0;
+}
+
+#record-form{
+  padding: 20px;
+  border: 1px solid #c6ea45;
+  border-radius: 10px;
+  width: 70vw;
+}
+
+#form-fields input[name="note"] {
+    height: 16em;
+  }
+
+  #form-fields input[name="article"] {
+    height: 16em;
+  }
