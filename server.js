@@ -183,6 +183,9 @@ app.get('/api/reference/orphans', async (req, res) => {
 
     const matchedItems = orphans.map(artwork => {
       return {
+        id: artwork.id,
+        parentId: artwork.parentId || [],
+        children: artwork.children || [],
         label: artwork.info.label,
         date: artwork.info.date || null,
         type: artwork.info.type || null
@@ -286,7 +289,10 @@ function createRecordSummary(record) {
   return {
     id: record.id || null,
     label: record.info?.label || null,
-    type: record.info?.type || null
+    type: record.info?.type || null,
+    date: record.info?.date || null,
+    birth: record.info?.birth || null,
+    death: record.info?.death || null
   };
 }
 

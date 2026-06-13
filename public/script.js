@@ -202,7 +202,7 @@ document.getElementById('query-button-orphans').addEventListener('click', async 
     const baseURL = `${window.location.protocol}//${window.location.host}`;
     const response = await fetch(`${baseURL}/api/reference/orphans`);
     const data = await response.json();
-    renderResults(data, 'result-artworkbook');
+    renderResults(data, 'result-artworkbook', true);
   });
 
 // Function to capture selections and trigger the database update
@@ -1086,7 +1086,7 @@ function appendGroupedIntegritySection(container, title, groups) {
     groups.forEach(group => {
         const groupBlock = document.createElement('details');
         groupBlock.classList.add('integrity-group');
-        groupBlock.open = group.count > 1 || group.valueKind === 'dirty-array-value';
+        groupBlock.open = false;
 
         const summary = document.createElement('summary');
         summary.textContent = `${group.displayValue} — ${group.count} record${group.count === 1 ? '' : 's'} (${group.valueKind})`;
@@ -1188,12 +1188,53 @@ function appendDirtyRelationshipCleanupPreview(container, preview) {
 }
 
 
-function formatRecordSummary(record) {
+function shortId(value) {
+    const stringValue = String(value || '');
+    if (stringValue.length <= 12) return stringValue;
+    return `${stringValue.slice(0, 8)}…${stringValue.slice(-4)}`;
+}
+
+function formatRecordSummary(record, options = {}) {
     if (!record) return 'Unknown record';
+
     const label = record.label || '(no label)';
     const type = record.type ? ` [${record.type}]` : '';
-    const id = record.id ? ` — ${record.id}` : '';
-    return `${label}${type}${id}`;
+
+    let dateBits = '';
+    if (record.type === 'theorist' || record.type === 'artist') {
+        if (record.birth && record.death) dateBits = ` (${record.birth}–${record.death})`;
+        else if (record.birth) dateBits = ` (${record.birth}–)`;
+    } else if (record.date) {
+        dateBits = ` (${record.date})`;
+    }
+
+    const id = record.id && options.includeId !== false ? ` — ${options.shortId ? shortId(record.id) : record.id}` : '';
+    return `${label}${dateBits}${type}${id}`;
+}
+
+function formatMissingParentGroupLabel(group) {
+    const records = group.records || [];
+    const samples = records.slice(0, 3).map(record => {
+        const date = record.date ? ` (${record.date})` : '';
+        return `${record.label || '(no label)'}${date}`;
+    });
+
+    const sampleText = samples.join(' / ');
+    const moreText = records.length > samples.length ? ` / +${records.length - samples.length} more` : '';
+    return `${group.count} record${group.count === 1 ? '' : 's'} — ${sampleText}${moreText} — ${shortId(group.displayValue)}`;
+}
+
+function appendRecordList(container, records, options = {}) {
+    const list = document.createElement('ul');
+    list.classList.add('record-context-list');
+
+    records.forEach(record => {
+        const item = document.createElement('li');
+        item.textContent = formatRecordSummary(record, { shortId: true, includeId: options.includeId !== false });
+        list.appendChild(item);
+    });
+
+    container.appendChild(list);
 }
 
 function appendMissingParentReplacementPreview(container, groups) {
@@ -1205,7 +1246,7 @@ function appendMissingParentReplacementPreview(container, groups) {
     section.appendChild(heading);
 
     const explanation = document.createElement('p');
-    explanation.textContent = 'Preview replacing one missing parent ID with an existing record. This does not write anything yet.';
+    explanation.textContent = 'Choose a missing parent group by the affected records, search for the current surviving parent record, then preview the repair. This does not write anything yet.';
     section.appendChild(explanation);
 
     const candidateGroups = (groups || []).filter(group => group.valueKind === 'missing-record-id');
@@ -1222,13 +1263,14 @@ function appendMissingParentReplacementPreview(container, groups) {
     controls.classList.add('missing-parent-preview-controls');
 
     const missingLabel = document.createElement('label');
-    missingLabel.textContent = 'Missing parent ID: ';
+    missingLabel.textContent = 'Affected records group: ';
 
     const missingSelect = document.createElement('select');
     candidateGroups.forEach(group => {
         const option = document.createElement('option');
         option.value = group.missingId;
-        option.textContent = `${group.displayValue} — ${group.count} record${group.count === 1 ? '' : 's'}`;
+        option.textContent = formatMissingParentGroupLabel(group);
+        option.title = `Missing parent ID: ${group.displayValue}`;
         missingSelect.appendChild(option);
     });
 
@@ -1248,6 +1290,10 @@ function appendMissingParentReplacementPreview(container, groups) {
     controls.appendChild(searchButton);
 
     section.appendChild(controls);
+
+    const groupContext = document.createElement('div');
+    groupContext.classList.add('missing-parent-group-context');
+    section.appendChild(groupContext);
 
     const candidateResults = document.createElement('div');
     candidateResults.classList.add('missing-parent-candidates');
@@ -1269,6 +1315,51 @@ function appendMissingParentReplacementPreview(container, groups) {
     let replacementId = null;
     let replacementSummary = null;
 
+    function getSelectedGroup() {
+        return candidateGroups.find(group => String(group.missingId) === missingSelect.value) || candidateGroups[0];
+    }
+
+    function renderSelectedGroupContext() {
+        const group = getSelectedGroup();
+        const records = group?.records || [];
+
+        groupContext.innerHTML = '';
+        previewResults.innerHTML = '';
+
+        const title = document.createElement('h4');
+        title.textContent = 'Affected records for selected missing parent';
+        groupContext.appendChild(title);
+
+        const meta = document.createElement('p');
+        meta.textContent = `Missing parent ID: ${group.displayValue} / ${group.count} affected record${group.count === 1 ? '' : 's'}.`;
+        groupContext.appendChild(meta);
+
+        if (!records.length) {
+            const empty = document.createElement('p');
+            empty.textContent = 'No affected records were included in this diagnostic group.';
+            groupContext.appendChild(empty);
+            return;
+        }
+
+        appendRecordList(groupContext, records, { includeId: false });
+
+        const hint = document.createElement('p');
+        hint.classList.add('integrity-help-text');
+        hint.textContent = 'Use these titles/dates to decide which current person or parent record to search for above.';
+        groupContext.appendChild(hint);
+    }
+
+    missingSelect.addEventListener('change', () => {
+        candidateResults.innerHTML = '';
+        replacementId = null;
+        replacementSummary = null;
+        selectedReplacement.textContent = 'No replacement selected.';
+        previewButton.disabled = true;
+        renderSelectedGroupContext();
+    });
+
+    renderSelectedGroupContext();
+
     function renderCandidateResults(results) {
         candidateResults.innerHTML = '';
         previewResults.innerHTML = '';
@@ -1286,12 +1377,12 @@ function appendMissingParentReplacementPreview(container, groups) {
             const candidateBlock = document.createElement('button');
             candidateBlock.type = 'button';
             candidateBlock.classList.add('candidate-result-button');
-            candidateBlock.textContent = formatRecordSummary(candidate);
+            candidateBlock.textContent = formatRecordSummary(candidate, { shortId: true });
 
             candidateBlock.addEventListener('click', () => {
                 replacementId = candidate.id;
                 replacementSummary = candidate;
-                selectedReplacement.textContent = `Selected replacement: ${formatRecordSummary(candidate)}`;
+                selectedReplacement.textContent = `Selected replacement: ${formatRecordSummary(candidate, { shortId: true })}`;
                 previewButton.disabled = false;
 
                 candidateResults.querySelectorAll('.candidate-result-button').forEach(button => {
@@ -1366,7 +1457,7 @@ function appendMissingParentReplacementPreview(container, groups) {
             previewResults.appendChild(warning);
 
             const summary = document.createElement('p');
-            summary.textContent = `Would replace ${preview.missingParentId} with ${formatRecordSummary(preview.replacement)} for ${preview.affectedCount || 0} record${preview.affectedCount === 1 ? '' : 's'}.`;
+            summary.textContent = `Would replace ${shortId(preview.missingParentId)} with ${formatRecordSummary(preview.replacement, { shortId: true })} for ${preview.affectedCount || 0} record${preview.affectedCount === 1 ? '' : 's'}.`;
             previewResults.appendChild(summary);
 
             const childrenSummary = document.createElement('p');
@@ -1376,12 +1467,19 @@ function appendMissingParentReplacementPreview(container, groups) {
             childrenSummary.textContent = `Replacement record would gain ${addCount} child reference${addCount === 1 ? '' : 's'} if this were applied later.`;
             previewResults.appendChild(childrenSummary);
 
+            if (Array.isArray(preview.changes) && preview.changes.length) {
+                const affectedHeading = document.createElement('h4');
+                affectedHeading.textContent = 'Affected records';
+                previewResults.appendChild(affectedHeading);
+                appendRecordList(previewResults, preview.changes.map(change => change.record), { includeId: false });
+            }
+
             const details = document.createElement('details');
             details.classList.add('integrity-group');
-            details.open = true;
+            details.open = false;
 
             const detailsSummary = document.createElement('summary');
-            detailsSummary.textContent = 'Preview details';
+            detailsSummary.textContent = 'Raw preview JSON';
             details.appendChild(detailsSummary);
 
             const pre = document.createElement('pre');
@@ -1426,6 +1524,16 @@ function renderIntegrityReport(report) {
 
     container.appendChild(summaryWrapper);
 
+    appendMissingParentReplacementPreview(
+        container,
+        report.groupedDiagnostics?.missingParentIdsGrouped || []
+    );
+
+    appendDirtyRelationshipCleanupPreview(
+        container,
+        report.cleanupPreviews?.dirtyRelationshipValues || { count: 0, changes: [] }
+    );
+
     appendGroupedIntegritySection(
         container,
         'Missing Parent IDs Grouped',
@@ -1436,16 +1544,6 @@ function renderIntegrityReport(report) {
         container,
         'Missing Child IDs Grouped',
         report.groupedDiagnostics?.missingChildIdsGrouped || []
-    );
-
-    appendMissingParentReplacementPreview(
-        container,
-        report.groupedDiagnostics?.missingParentIdsGrouped || []
-    );
-
-    appendDirtyRelationshipCleanupPreview(
-        container,
-        report.cleanupPreviews?.dirtyRelationshipValues || { count: 0, changes: [] }
     );
 
     const issueOrder = [

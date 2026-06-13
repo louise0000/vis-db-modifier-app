@@ -622,3 +622,35 @@ nav ul li a:hover {
     font-weight: bold;
 }
 
+
+/* Human-readable missing-parent repair context */
+.missing-parent-group-context {
+    margin: 12px 0;
+    padding: 10px;
+    background: #ffffff99;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+}
+
+.missing-parent-group-context h4,
+.missing-parent-preview-results h4 {
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.record-context-list {
+    list-style: disc;
+    margin: 8px 0 8px 20px;
+    padding-left: 16px;
+}
+
+.record-context-list li {
+    margin-bottom: 4px;
+    line-height: 1.35;
+}
+
+.integrity-help-text {
+    margin-top: 8px;
+    font-size: 13px;
+    opacity: 0.8;
+}
