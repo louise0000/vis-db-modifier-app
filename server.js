@@ -477,6 +477,75 @@ async function applyDirtyRelationshipValueCleanup(collection) {
   };
 }
 
+
+function createStaleChildReferenceCleanupPreview(records) {
+  const recordsById = new Map(records.filter(record => record.id).map(record => [record.id, record]));
+  const changes = [];
+
+  records.forEach(record => {
+    if (!Array.isArray(record.children)) return;
+
+    const before = record.children;
+    const staleChildIds = before.filter(childId =>
+      !isDirtyRelationshipValue(childId) && !recordsById.has(childId)
+    );
+
+    if (!staleChildIds.length) return;
+
+    const after = before.filter(childId =>
+      isDirtyRelationshipValue(childId) || recordsById.has(childId)
+    );
+
+    changes.push({
+      record: createRecordSummary(record),
+      children: {
+        before,
+        after,
+        removed: staleChildIds
+      }
+    });
+  });
+
+  return {
+    count: changes.length,
+    removedReferenceCount: changes.reduce((total, change) => total + change.children.removed.length, 0),
+    changes
+  };
+}
+
+async function applyStaleChildReferenceCleanup(collection) {
+  const records = await collection.find({}, {
+    projection: {
+      _id: 0,
+      id: 1,
+      parentId: 1,
+      children: 1,
+      info: 1
+    }
+  }).toArray();
+
+  const preview = createStaleChildReferenceCleanupPreview(records);
+
+  if (preview.changes.length === 0) {
+    return { matchedCount: 0, modifiedCount: 0, preview };
+  }
+
+  const operations = preview.changes.map(change => ({
+    updateOne: {
+      filter: { id: change.record.id },
+      update: { $set: { children: change.children.after } }
+    }
+  }));
+
+  const result = await collection.bulkWrite(operations);
+
+  return {
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+    preview
+  };
+}
+
 function registerIdAndLabelGroups(record, recordsById, idGroups, duplicateLabelGroups, issues) {
   if (!record.id) {
     issues.recordsMissingId.push(createRecordSummary(record));
@@ -635,7 +704,8 @@ function buildIntegrityReport(records) {
     summary,
     groupedDiagnostics: createGroupedIntegrityDiagnostics(issues),
     cleanupPreviews: {
-      dirtyRelationshipValues: createDirtyRelationshipValueCleanupPreview(records)
+      dirtyRelationshipValues: createDirtyRelationshipValueCleanupPreview(records),
+      staleChildReferences: createStaleChildReferenceCleanupPreview(records)
     },
     issues
   };
@@ -845,6 +915,42 @@ app.post('/api/reference/dirty-relationship-values/clean', async (req, res) => {
     });
   } catch (err) {
     console.error('Error cleaning dirty relationship values:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+
+// Preview-only endpoint for stale child references. This does not write anything.
+app.get('/api/reference/stale-child-references/preview', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const records = await fetchReferenceRecordsForRelationshipRepair(collection);
+
+    res.json(createStaleChildReferenceCleanupPreview(records));
+  } catch (err) {
+    console.error('Error previewing stale child reference cleanup:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Narrow cleanup endpoint: removes only children IDs that point to no existing record.
+// It does not touch parentId arrays, relationship direction, duplicates, or info fields.
+app.post('/api/reference/stale-child-references/clean', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const result = await applyStaleChildReferenceCleanup(collection);
+
+    res.json({
+      success: true,
+      message: result.modifiedCount === 0
+        ? 'No stale child references needed cleaning.'
+        : `Removed ${result.preview.removedReferenceCount} stale child reference${result.preview.removedReferenceCount === 1 ? '' : 's'} from ${result.modifiedCount} record${result.modifiedCount === 1 ? '' : 's'}.`,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      preview: result.preview
+    });
+  } catch (err) {
+    console.error('Error cleaning stale child references:', err);
     res.status(500).json({ error: err.toString() });
   }
 });

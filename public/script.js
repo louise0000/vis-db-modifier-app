@@ -1188,6 +1188,75 @@ function appendDirtyRelationshipCleanupPreview(container, preview) {
 }
 
 
+
+function appendStaleChildReferenceCleanupPreview(container, preview) {
+    const section = document.createElement('div');
+    section.classList.add('integrity-section', 'stale-child-cleanup-preview');
+
+    const heading = document.createElement('h3');
+    heading.textContent = `Stale Child Reference Cleanup Preview (${preview?.count || 0})`;
+    section.appendChild(heading);
+
+    const explanation = document.createElement('p');
+    explanation.textContent = 'This narrow cleanup removes only children IDs that point to no existing record. It does not touch parentId arrays, repair authors, merge duplicates, or edit info fields.';
+    section.appendChild(explanation);
+
+    if (!preview || !Array.isArray(preview.changes) || preview.changes.length === 0) {
+        const ok = document.createElement('p');
+        ok.textContent = 'No stale child references found.';
+        section.appendChild(ok);
+        container.appendChild(section);
+        return;
+    }
+
+    const details = document.createElement('details');
+    details.classList.add('integrity-group');
+    details.open = true;
+
+    const removedReferenceCount = preview.removedReferenceCount || 0;
+    const summary = document.createElement('summary');
+    summary.textContent = `Preview ${removedReferenceCount} stale child reference${removedReferenceCount === 1 ? '' : 's'} in ${preview.changes.length} record${preview.changes.length === 1 ? '' : 's'}`;
+    details.appendChild(summary);
+
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(preview.changes, null, 2);
+    details.appendChild(pre);
+    section.appendChild(details);
+
+    const cleanButton = createButton('Clean Stale Child References', 'integrity-danger-button');
+    cleanButton.addEventListener('click', async () => {
+        const confirmed = confirm('Clean stale child references? This removes only children IDs that no longer point to an existing record. It does not alter parentId arrays.');
+        if (!confirmed) return;
+
+        cleanButton.disabled = true;
+        cleanButton.textContent = 'Cleaning...';
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/stale-child-references/clean`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || 'Cleanup failed.');
+            }
+
+            alert(result.message || 'Cleanup complete.');
+            await rerunIntegrityReport();
+        } catch (error) {
+            console.error('Error cleaning stale child references:', error);
+            alert('Failed to clean stale child references. Check the server console for details.');
+            cleanButton.disabled = false;
+            cleanButton.textContent = 'Clean Stale Child References';
+        }
+    });
+
+    section.appendChild(cleanButton);
+    container.appendChild(section);
+}
+
+
 function shortId(value) {
     const stringValue = String(value || '');
     if (stringValue.length <= 12) return stringValue;
@@ -1598,6 +1667,11 @@ function renderIntegrityReport(report) {
     appendDirtyRelationshipCleanupPreview(
         container,
         report.cleanupPreviews?.dirtyRelationshipValues || { count: 0, changes: [] }
+    );
+
+    appendStaleChildReferenceCleanupPreview(
+        container,
+        report.cleanupPreviews?.staleChildReferences || { count: 0, removedReferenceCount: 0, changes: [] }
     );
 
     appendGroupedIntegritySection(

@@ -664,3 +664,10 @@ nav ul li a:hover {
 .missing-parent-preview-results p:first-child {
     font-weight: bold;
 }
+
+
+
+/* Stale child reference cleanup */
+.stale-child-cleanup-preview {
+    border-style: solid;
+}
