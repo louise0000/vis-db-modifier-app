@@ -549,3 +549,76 @@ nav ul li a:hover {
     opacity: 0.55;
     cursor: wait;
 }
+
+/* Read-only missing parent replacement preview */
+.missing-parent-preview-section {
+    border-style: dashed;
+}
+
+.missing-parent-preview-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin: 12px 0;
+}
+
+.missing-parent-preview-controls label {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.missing-parent-preview-controls input,
+.missing-parent-preview-controls select {
+    padding: 6px;
+    border: 1px solid #00000022;
+    border-radius: 6px;
+    max-width: 32vw;
+}
+
+.integrity-secondary-button,
+.candidate-result-button {
+    margin: 6px 6px 6px 0;
+    padding: 8px 12px;
+    font-size: 13px;
+    background-color: #333;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.integrity-secondary-button:hover:not(:disabled),
+.candidate-result-button:hover {
+    background-color: #555;
+}
+
+.integrity-secondary-button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.candidate-result-button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background-color: #ffffffaa;
+    color: #222;
+    border: 1px solid #00000022;
+}
+
+.candidate-result-button.selected {
+    background-color: #d7efff;
+    border-color: #333;
+}
+
+.missing-parent-candidates,
+.missing-parent-preview-results {
+    margin: 12px 0;
+}
+
+.missing-parent-selection {
+    font-weight: bold;
+}
+

@@ -1187,6 +1187,217 @@ function appendDirtyRelationshipCleanupPreview(container, preview) {
     container.appendChild(section);
 }
 
+
+function formatRecordSummary(record) {
+    if (!record) return 'Unknown record';
+    const label = record.label || '(no label)';
+    const type = record.type ? ` [${record.type}]` : '';
+    const id = record.id ? ` — ${record.id}` : '';
+    return `${label}${type}${id}`;
+}
+
+function appendMissingParentReplacementPreview(container, groups) {
+    const section = document.createElement('div');
+    section.classList.add('integrity-section', 'missing-parent-preview-section');
+
+    const heading = document.createElement('h3');
+    heading.textContent = 'Missing Parent Replacement Preview';
+    section.appendChild(heading);
+
+    const explanation = document.createElement('p');
+    explanation.textContent = 'Preview replacing one missing parent ID with an existing record. This does not write anything yet.';
+    section.appendChild(explanation);
+
+    const candidateGroups = (groups || []).filter(group => group.valueKind === 'missing-record-id');
+
+    if (!candidateGroups.length) {
+        const ok = document.createElement('p');
+        ok.textContent = 'No missing parent IDs available for replacement preview.';
+        section.appendChild(ok);
+        container.appendChild(section);
+        return;
+    }
+
+    const controls = document.createElement('div');
+    controls.classList.add('missing-parent-preview-controls');
+
+    const missingLabel = document.createElement('label');
+    missingLabel.textContent = 'Missing parent ID: ';
+
+    const missingSelect = document.createElement('select');
+    candidateGroups.forEach(group => {
+        const option = document.createElement('option');
+        option.value = group.missingId;
+        option.textContent = `${group.displayValue} — ${group.count} record${group.count === 1 ? '' : 's'}`;
+        missingSelect.appendChild(option);
+    });
+
+    missingLabel.appendChild(missingSelect);
+    controls.appendChild(missingLabel);
+
+    const searchLabel = document.createElement('label');
+    searchLabel.textContent = ' Search replacement record: ';
+
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.placeholder = 'e.g. Jacques Lacan';
+    searchLabel.appendChild(searchInput);
+    controls.appendChild(searchLabel);
+
+    const searchButton = createButton('Search Candidates', 'integrity-secondary-button');
+    controls.appendChild(searchButton);
+
+    section.appendChild(controls);
+
+    const candidateResults = document.createElement('div');
+    candidateResults.classList.add('missing-parent-candidates');
+    section.appendChild(candidateResults);
+
+    const selectedReplacement = document.createElement('p');
+    selectedReplacement.classList.add('missing-parent-selection');
+    selectedReplacement.textContent = 'No replacement selected.';
+    section.appendChild(selectedReplacement);
+
+    const previewButton = createButton('Preview Replacement', 'integrity-secondary-button');
+    previewButton.disabled = true;
+    section.appendChild(previewButton);
+
+    const previewResults = document.createElement('div');
+    previewResults.classList.add('missing-parent-preview-results');
+    section.appendChild(previewResults);
+
+    let replacementId = null;
+    let replacementSummary = null;
+
+    function renderCandidateResults(results) {
+        candidateResults.innerHTML = '';
+        previewResults.innerHTML = '';
+        replacementId = null;
+        replacementSummary = null;
+        selectedReplacement.textContent = 'No replacement selected.';
+        previewButton.disabled = true;
+
+        if (!results.length) {
+            candidateResults.textContent = 'No candidate records found.';
+            return;
+        }
+
+        results.forEach(candidate => {
+            const candidateBlock = document.createElement('button');
+            candidateBlock.type = 'button';
+            candidateBlock.classList.add('candidate-result-button');
+            candidateBlock.textContent = formatRecordSummary(candidate);
+
+            candidateBlock.addEventListener('click', () => {
+                replacementId = candidate.id;
+                replacementSummary = candidate;
+                selectedReplacement.textContent = `Selected replacement: ${formatRecordSummary(candidate)}`;
+                previewButton.disabled = false;
+
+                candidateResults.querySelectorAll('.candidate-result-button').forEach(button => {
+                    button.classList.remove('selected');
+                });
+                candidateBlock.classList.add('selected');
+            });
+
+            candidateResults.appendChild(candidateBlock);
+        });
+    }
+
+    searchButton.addEventListener('click', async () => {
+        const query = searchInput.value.trim();
+
+        if (!query) {
+            alert('Enter a label to search for a replacement record.');
+            return;
+        }
+
+        candidateResults.textContent = 'Searching...';
+        previewResults.innerHTML = '';
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/missing-parent-replacement/candidates?query=${encodeURIComponent(query)}`);
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Candidate search failed.');
+            }
+
+            renderCandidateResults(data.results || []);
+        } catch (error) {
+            console.error('Error searching replacement candidates:', error);
+            candidateResults.textContent = 'Candidate search failed. Check the server console.';
+        }
+    });
+
+    searchInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            searchButton.click();
+        }
+    });
+
+    previewButton.addEventListener('click', async () => {
+        if (!replacementId) {
+            alert('Select a replacement record first.');
+            return;
+        }
+
+        const missingParentId = missingSelect.value;
+
+        previewResults.textContent = 'Building preview...';
+
+        try {
+            const url = `${baseURL}/api/reference/missing-parent-replacement/preview?missingParentId=${encodeURIComponent(missingParentId)}&replacementId=${encodeURIComponent(replacementId)}`;
+            const response = await fetch(url);
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Preview failed.');
+            }
+
+            const preview = data.preview || {};
+            previewResults.innerHTML = '';
+
+            const warning = document.createElement('p');
+            warning.textContent = data.oldRecordStillExists
+                ? 'Warning: the old parent ID still exists in the database, so this is not a simple missing-record repair.'
+                : 'Read-only preview. No database changes have been made.';
+            previewResults.appendChild(warning);
+
+            const summary = document.createElement('p');
+            summary.textContent = `Would replace ${preview.missingParentId} with ${formatRecordSummary(preview.replacement)} for ${preview.affectedCount || 0} record${preview.affectedCount === 1 ? '' : 's'}.`;
+            previewResults.appendChild(summary);
+
+            const childrenSummary = document.createElement('p');
+            const addCount = Array.isArray(preview.childIdsToAddToReplacement)
+                ? preview.childIdsToAddToReplacement.length
+                : 0;
+            childrenSummary.textContent = `Replacement record would gain ${addCount} child reference${addCount === 1 ? '' : 's'} if this were applied later.`;
+            previewResults.appendChild(childrenSummary);
+
+            const details = document.createElement('details');
+            details.classList.add('integrity-group');
+            details.open = true;
+
+            const detailsSummary = document.createElement('summary');
+            detailsSummary.textContent = 'Preview details';
+            details.appendChild(detailsSummary);
+
+            const pre = document.createElement('pre');
+            pre.textContent = JSON.stringify(preview, null, 2);
+            details.appendChild(pre);
+            previewResults.appendChild(details);
+        } catch (error) {
+            console.error('Error building replacement preview:', error);
+            previewResults.textContent = 'Replacement preview failed. Check the server console.';
+        }
+    });
+
+    container.appendChild(section);
+}
+
+
 function renderIntegrityReport(report) {
     const container = document.getElementById('integrity-report-results');
     container.innerHTML = '';
@@ -1227,6 +1438,10 @@ function renderIntegrityReport(report) {
         report.groupedDiagnostics?.missingChildIdsGrouped || []
     );
 
+    appendMissingParentReplacementPreview(
+        container,
+        report.groupedDiagnostics?.missingParentIdsGrouped || []
+    );
 
     appendDirtyRelationshipCleanupPreview(
         container,

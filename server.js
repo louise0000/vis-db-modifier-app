@@ -635,6 +635,67 @@ function buildIntegrityReport(records) {
   };
 }
 
+
+function createMissingParentReplacementPreview(records, missingParentId, replacementRecord) {
+  const affectedRecords = records.filter(record =>
+    Array.isArray(record.parentId) && record.parentId.includes(missingParentId)
+  );
+
+  const replacementChildren = Array.isArray(replacementRecord.children)
+    ? replacementRecord.children
+    : [];
+
+  const affectedIds = affectedRecords
+    .map(record => record.id)
+    .filter(Boolean);
+
+  const childIdsToAddToReplacement = affectedIds.filter(id => !replacementChildren.includes(id));
+  const replacementChildrenAfter = Array.from(new Set([...replacementChildren, ...affectedIds]));
+
+  const changes = affectedRecords.map(record => {
+    const beforeParentId = Array.isArray(record.parentId) ? record.parentId : [];
+    const afterParentId = Array.from(new Set(
+      beforeParentId.map(parentId => parentId === missingParentId ? replacementRecord.id : parentId)
+    ));
+
+    return {
+      record: createRecordSummary(record),
+      parentId: {
+        before: beforeParentId,
+        after: afterParentId
+      }
+    };
+  });
+
+  return {
+    missingParentId,
+    replacement: createRecordSummary(replacementRecord),
+    affectedCount: affectedRecords.length,
+    childIdsToAddToReplacement,
+    replacementChildren: {
+      beforeCount: replacementChildren.length,
+      afterCount: replacementChildrenAfter.length,
+      before: replacementChildren,
+      after: replacementChildrenAfter
+    },
+    changes
+  };
+}
+
+function createReplacementCandidateSummary(result) {
+  const item = result.item || result;
+
+  return {
+    id: item.id || null,
+    label: item.info?.label || null,
+    type: item.info?.type || null,
+    birth: item.info?.birth || null,
+    death: item.info?.death || null,
+    date: item.info?.date || null,
+    score: typeof result.score === 'number' ? result.score : null
+  };
+}
+
 // Read-only integrity report. This route does not write, repair, merge, or delete anything.
 app.get('/api/reference/integrity-report', async (req, res) => {
   try {
@@ -698,6 +759,95 @@ app.post('/api/reference/dirty-relationship-values/clean', async (req, res) => {
     res.status(500).json({ error: err.toString() });
   }
 });
+
+
+// Candidate search for missing-parent replacement preview. This does not write anything.
+app.get('/api/reference/missing-parent-replacement/candidates', async (req, res) => {
+  try {
+    const query = String(req.query.query || '').trim();
+
+    if (!query) {
+      return res.status(400).json({ error: 'A query parameter is required.' });
+    }
+
+    const collection = db.collection('reference');
+    const documents = await collection.find({}, {
+      projection: {
+        _id: 0,
+        id: 1,
+        parentId: 1,
+        children: 1,
+        info: 1
+      }
+    }).toArray();
+
+    const options = {
+      keys: ['info.label', 'info.label_jp', 'info.altLabel', 'info.altLabels'],
+      threshold: 0.35,
+      distance: 120,
+      includeScore: true,
+    };
+
+    const fuse = new Fuse(documents, options);
+    const results = fuse.search(query)
+      .slice(0, 20)
+      .map(createReplacementCandidateSummary);
+
+    res.json({ query, results });
+  } catch (err) {
+    console.error('Error searching missing-parent replacement candidates:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Preview missing-parent replacement. This does not write anything.
+app.get('/api/reference/missing-parent-replacement/preview', async (req, res) => {
+  try {
+    const missingParentId = String(req.query.missingParentId || '').trim();
+    const replacementId = String(req.query.replacementId || '').trim();
+
+    if (!missingParentId || !replacementId) {
+      return res.status(400).json({ error: 'Both missingParentId and replacementId are required.' });
+    }
+
+    if (isDirtyRelationshipValue(missingParentId) || isDirtyRelationshipValue(replacementId)) {
+      return res.status(400).json({ error: 'Dirty relationship values cannot be used for replacement preview.' });
+    }
+
+    if (missingParentId === replacementId) {
+      return res.status(400).json({ error: 'The missing parent ID and replacement ID must be different.' });
+    }
+
+    const collection = db.collection('reference');
+    const records = await collection.find({}, {
+      projection: {
+        _id: 0,
+        id: 1,
+        parentId: 1,
+        children: 1,
+        info: 1
+      }
+    }).toArray();
+
+    const replacementRecord = records.find(record => record.id === replacementId);
+
+    if (!replacementRecord) {
+      return res.status(404).json({ error: 'Replacement record not found.' });
+    }
+
+    const oldRecordStillExists = records.some(record => record.id === missingParentId);
+    const preview = createMissingParentReplacementPreview(records, missingParentId, replacementRecord);
+
+    res.json({
+      oldRecordStillExists,
+      preview
+    });
+  } catch (err) {
+    console.error('Error previewing missing-parent replacement:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
 
 
 //search for full record of selected duplicates
