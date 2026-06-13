@@ -1,6 +1,99 @@
 // Define the baseURL at the top of your script or before it's used
 const baseURL = `${window.location.protocol}//${window.location.host}`;
 
+// Root relationship fields belong at the document root, not inside info.
+// Keeping this explicit helps avoid accidental schema drift during manual edits/imports.
+const ROOT_RELATIONSHIP_FIELDS = new Set(['parentId', 'children']);
+const MULTILINE_INFO_FIELDS = new Set(['note', 'note_jp', 'article']);
+
+function ensureJapaneseNoteField(info = {}) {
+    const nextInfo = { ...info };
+    if (!Object.prototype.hasOwnProperty.call(nextInfo, 'note_jp')) {
+        nextInfo.note_jp = '';
+    }
+    return nextInfo;
+}
+
+function getInfoEntriesWithJapaneseNote(info = {}) {
+    const nextInfo = ensureJapaneseNoteField(info);
+    const entries = Object.entries(nextInfo).filter(([key]) => {
+        return key !== '_id' && key !== 'id' && !ROOT_RELATIONSHIP_FIELDS.has(key);
+    });
+
+    const noteIndex = entries.findIndex(([key]) => key === 'note');
+    const noteJpIndex = entries.findIndex(([key]) => key === 'note_jp');
+
+    // Keep note_jp beside note when the source/template did not already place it there.
+    if (noteIndex !== -1 && noteJpIndex !== -1 && noteJpIndex !== noteIndex + 1) {
+        const [noteJpEntry] = entries.splice(noteJpIndex, 1);
+        entries.splice(noteIndex + 1, 0, noteJpEntry);
+    }
+
+    return entries;
+}
+
+function formatValueForEditor(value) {
+    if (value == null) return '';
+    if (Array.isArray(value)) return value.join(', ');
+    if (typeof value === 'object') return JSON.stringify(value, null, 2);
+    return String(value);
+}
+
+function parseRootArrayField(value) {
+    return String(value || '')
+        .split(',')
+        .map(item => item.trim())
+        .filter(Boolean);
+}
+
+function parseEditedInfoValue(value, originalValue) {
+    const rawValue = String(value ?? '');
+
+    if (Array.isArray(originalValue)) {
+        return parseRootArrayField(rawValue);
+    }
+
+    if (typeof originalValue === 'number') {
+        const numericValue = Number(rawValue);
+        return Number.isNaN(numericValue) ? rawValue : numericValue;
+    }
+
+    if (typeof originalValue === 'boolean') {
+        return rawValue === 'true';
+    }
+
+    if (originalValue && typeof originalValue === 'object') {
+        try {
+            return JSON.parse(rawValue);
+        } catch (error) {
+            console.warn('Keeping edited object-like field as text because JSON parsing failed.');
+            return rawValue;
+        }
+    }
+
+    return rawValue;
+}
+
+function appendFormField(container, key, value) {
+    const label = document.createElement('label');
+    label.textContent = key.charAt(0).toUpperCase() + key.slice(1) + ':';
+
+    const input = MULTILINE_INFO_FIELDS.has(key)
+        ? document.createElement('textarea')
+        : document.createElement('input');
+
+    if (input.tagName === 'INPUT') {
+        input.type = 'text';
+    }
+
+    input.name = key;
+    input.value = formatValueForEditor(value);
+
+    container.appendChild(label);
+    container.appendChild(input);
+    container.appendChild(document.createElement('br'));
+}
+
 
 // Function to render results
 async function renderResults(data, resultElementId, multiple = false) {
@@ -537,17 +630,25 @@ async function handleEditRecord(data) {
     const editRecord = document.getElementById('edit-record');
     editRecord.innerHTML = ''; // Clear previous content
 
+    const originalInfo = data.info || {};
     const ulElement = document.createElement('ul');
 
-    for (const [key, value] of Object.entries(data.info)) {
+    for (const [key, value] of getInfoEntriesWithJapaneseNote(originalInfo)) {
         const li = document.createElement('li');
 
-        if (key === 'note') {
-            li.innerHTML = `<strong>${key}:</strong> <span id="edit-note" contenteditable="true">${value}</span>`;
-        } else {
-            li.innerHTML = `<strong>${key}:</strong> <span contenteditable="true">${value}</span>`;
+        const strong = document.createElement('strong');
+        strong.textContent = `${key}:`;
+
+        const span = document.createElement('span');
+        span.contentEditable = 'true';
+        span.textContent = formatValueForEditor(value);
+
+        if (MULTILINE_INFO_FIELDS.has(key)) {
+            span.classList.add('edit-long-field');
         }
 
+        li.appendChild(strong);
+        li.appendChild(span);
         ulElement.appendChild(li);
     }
 
@@ -562,7 +663,7 @@ async function handleEditRecord(data) {
         ulElement.querySelectorAll('li').forEach(li => {
             const key = li.querySelector('strong').textContent.replace(':', '');
             const value = li.querySelector('span').textContent;
-            updatedInfo[key] = value;
+            updatedInfo[key] = parseEditedInfoValue(value, originalInfo[key]);
         });
 
         const response = await fetch(`${window.location.protocol}//${window.location.host}/api/reference/update/${data.id}`, {
@@ -760,20 +861,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         newRecord.children = [];
     
         formData.forEach((value, key) => {
-            if (key === 'parentId' || key === 'children') {
-                // Convert comma-separated string into an array and remove empty strings
-                const array = value.split(',').map(item => item.trim()).filter(item => item !== '');
-                info[key] = array;
-    
-                if (array.length > 0) {
-                    newRecord[key] = array;  // Add to root level if there are elements
-                }
+            if (ROOT_RELATIONSHIP_FIELDS.has(key)) {
+                // parentId and children are root-level relationship arrays.
+                // Do not also copy them into info, or new records drift into two schemas.
+                newRecord[key] = parseRootArrayField(value);
             } else {
                 info[key] = value;
             }
         });
-    
-        newRecord.info = info;
+
+        if (!info.type && typeSelect.value) {
+            info.type = typeSelect.value;
+        }
+
+        newRecord.info = ensureJapaneseNoteField(info);
     
         try {
             const response = await fetch(`${baseURL}/api/reference/new`, {
@@ -809,28 +910,12 @@ function generateForm(template) {
     const formFields = document.getElementById('form-fields');
     formFields.innerHTML = ''; // Clear any previous fields
 
-    for (const [key, value] of Object.entries(template.info)) {
-        if (key !== '_id' && key !== 'id') { // Skip MongoDB and record ID
-            const label = document.createElement('label');
-            label.textContent = key.charAt(0).toUpperCase() + key.slice(1) + ':';
-            const input = document.createElement('input');
-            input.type = 'text';
-            input.name = key;
-
-            // If it's an array, join it into a comma-separated string
-            if (Array.isArray(value)) {
-                input.value = value.join(', ');
-            } else {
-                input.value = value;
-            }
-
-            formFields.appendChild(label);
-            formFields.appendChild(input);
-            formFields.appendChild(document.createElement('br')); // Add a line break between fields
-        }
+    for (const [key, value] of getInfoEntriesWithJapaneseNote(template.info || {})) {
+        appendFormField(formFields, key, value);
     }
 
-    // Generate input fields for `parentId` and `children` at the root level
+    // Generate input fields for `parentId` and `children` at the root level.
+    // These fields are intentionally not copied into info during submit.
     if (template.parentId) {
         const label = document.createElement('label');
         label.innerHTML = `Parent ID <br/><span>(comma-separated):</span>`;

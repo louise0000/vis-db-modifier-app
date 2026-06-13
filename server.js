@@ -24,6 +24,36 @@ app.use(express.static('public'));
 const dbName = 'philosophyDiagrams';
 let db;
 
+const ROOT_RELATIONSHIP_FIELDS = ['parentId', 'children'];
+
+function normaliseRelationshipArray(value) {
+  if (Array.isArray(value)) {
+    return value.map(item => String(item).trim()).filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    return value.split(',').map(item => item.trim()).filter(Boolean);
+  }
+
+  return [];
+}
+
+function normaliseInfo(info = {}) {
+  const nextInfo = { ...info };
+
+  // Relationship arrays are root-level fields in the reference schema.
+  // Remove accidental duplicates from info during manual adds/edits.
+  ROOT_RELATIONSHIP_FIELDS.forEach(field => {
+    delete nextInfo[field];
+  });
+
+  if (!Object.prototype.hasOwnProperty.call(nextInfo, 'note_jp')) {
+    nextInfo.note_jp = '';
+  }
+
+  return nextInfo;
+}
+
 client.connect().then(() => {
   db = client.db(dbName);
   console.log('Connected to MongoDB');
@@ -344,10 +374,25 @@ app.put('/api/reference/update/:id', async (req, res) => {
       const updatedInfo = req.body.info;
       const collection = db.collection('reference');
 
-      const result = await collection.updateOne({ id }, { $set: { info: updatedInfo } });
+      if (!updatedInfo || typeof updatedInfo !== 'object' || Array.isArray(updatedInfo)) {
+          return res.status(400).json({ message: 'Invalid request: info object is required.' });
+      }
 
-      if (result.modifiedCount === 1) {
-          res.json({ message: 'Record updated successfully.' });
+      const existingRecord = await collection.findOne({ id });
+
+      if (!existingRecord) {
+          return res.status(404).json({ message: 'Record not found.' });
+      }
+
+      const mergedInfo = normaliseInfo({
+          ...(existingRecord.info || {}),
+          ...updatedInfo
+      });
+
+      const result = await collection.updateOne({ id }, { $set: { info: mergedInfo } });
+
+      if (result.matchedCount === 1) {
+          res.json({ message: result.modifiedCount === 1 ? 'Record updated successfully.' : 'Record found; no changes were needed.' });
       } else {
           res.status(404).json({ message: 'Record not found.' });
       }
@@ -385,6 +430,10 @@ app.post('/api/reference/new', async (req, res) => {
   try {
       const newRecord = req.body;
       const collection = db.collection('reference');
+
+      newRecord.parentId = normaliseRelationshipArray(newRecord.parentId);
+      newRecord.children = normaliseRelationshipArray(newRecord.children);
+      newRecord.info = normaliseInfo(newRecord.info || {});
       
       // Start a transaction
       session.startTransaction();

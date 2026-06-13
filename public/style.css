@@ -418,3 +418,19 @@ nav ul li a:hover {
   #form-fields input[name="article"] {
     height: 16em;
   }
+/* Stabilisation pass: long text fields for notes / Japanese notes */
+#edit-record li span.edit-long-field {
+    min-height: 16em;
+    white-space: pre-wrap;
+}
+
+#form-fields textarea {
+    width: 80%;
+    min-height: 16em;
+    margin-bottom: 10px;
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid #c6ea45;
+    font-family: inherit;
+    vertical-align: top;
+}
