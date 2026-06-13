@@ -1102,6 +1102,91 @@ function appendGroupedIntegritySection(container, title, groups) {
     container.appendChild(section);
 }
 
+function createButton(label, className) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    if (className) button.classList.add(className);
+    return button;
+}
+
+async function rerunIntegrityReport() {
+    const response = await fetch(`${baseURL}/api/reference/integrity-report`);
+    const report = await response.json();
+
+    if (!response.ok) {
+        throw new Error(report.error || 'Failed to run integrity report.');
+    }
+
+    renderIntegrityReport(report);
+}
+
+function appendDirtyRelationshipCleanupPreview(container, preview) {
+    const section = document.createElement('div');
+    section.classList.add('integrity-section', 'integrity-cleanup-preview');
+
+    const heading = document.createElement('h3');
+    heading.textContent = `Dirty Relationship Value Cleanup Preview (${preview?.count || 0})`;
+    section.appendChild(heading);
+
+    const explanation = document.createElement('p');
+    explanation.textContent = 'This narrow cleanup removes only null, undefined, "undefined", "null", and empty-string values from root-level parentId / children arrays. It does not repair missing IDs or merge records.';
+    section.appendChild(explanation);
+
+    if (!preview || !Array.isArray(preview.changes) || preview.changes.length === 0) {
+        const ok = document.createElement('p');
+        ok.textContent = 'No dirty relationship values found.';
+        section.appendChild(ok);
+        container.appendChild(section);
+        return;
+    }
+
+    const details = document.createElement('details');
+    details.classList.add('integrity-group');
+    details.open = true;
+
+    const summary = document.createElement('summary');
+    summary.textContent = `Preview ${preview.changes.length} record${preview.changes.length === 1 ? '' : 's'} that would be cleaned`;
+    details.appendChild(summary);
+
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(preview.changes, null, 2);
+    details.appendChild(pre);
+    section.appendChild(details);
+
+    const cleanButton = createButton('Clean Dirty Relationship Values', 'integrity-danger-button');
+    cleanButton.addEventListener('click', async () => {
+        const confirmed = confirm('Clean only dirty relationship array values? This removes null / undefined / empty relationship IDs, but does not repair missing records.');
+        if (!confirmed) return;
+
+        cleanButton.disabled = true;
+        cleanButton.textContent = 'Cleaning...';
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/dirty-relationship-values/clean`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || 'Cleanup failed.');
+            }
+
+            alert(result.message || 'Cleanup complete.');
+            await rerunIntegrityReport();
+        } catch (error) {
+            console.error('Error cleaning dirty relationship values:', error);
+            alert('Failed to clean dirty relationship values. Check the server console for details.');
+            cleanButton.disabled = false;
+            cleanButton.textContent = 'Clean Dirty Relationship Values';
+        }
+    });
+
+    section.appendChild(cleanButton);
+    container.appendChild(section);
+}
+
 function renderIntegrityReport(report) {
     const container = document.getElementById('integrity-report-results');
     container.innerHTML = '';
@@ -1142,6 +1227,12 @@ function renderIntegrityReport(report) {
         report.groupedDiagnostics?.missingChildIdsGrouped || []
     );
 
+
+    appendDirtyRelationshipCleanupPreview(
+        container,
+        report.cleanupPreviews?.dirtyRelationshipValues || { count: 0, changes: [] }
+    );
+
     const issueOrder = [
         'recordsMissingId',
         'duplicateIds',
@@ -1169,14 +1260,7 @@ if (integrityButton) {
         container.textContent = 'Running integrity report...';
 
         try {
-            const response = await fetch(`${baseURL}/api/reference/integrity-report`);
-            const report = await response.json();
-
-            if (!response.ok) {
-                throw new Error(report.error || 'Failed to run integrity report.');
-            }
-
-            renderIntegrityReport(report);
+            await rerunIntegrityReport();
         } catch (error) {
             console.error('Error running integrity report:', error);
             container.textContent = 'Failed to run integrity report. Check the server console for details.';

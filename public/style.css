@@ -523,3 +523,29 @@ nav ul li a:hover {
     margin-top: 8px;
     max-height: 30vh;
 }
+
+
+/* Narrow write action inside integrity report */
+.integrity-cleanup-preview {
+    border-style: solid;
+}
+
+.integrity-danger-button {
+    margin: 10px 0 0 0;
+    padding: 10px 18px;
+    font-size: 14px;
+    background-color: #5f2c2c;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.integrity-danger-button:hover:not(:disabled) {
+    background-color: #7b3838;
+}
+
+.integrity-danger-button:disabled {
+    opacity: 0.55;
+    cursor: wait;
+}

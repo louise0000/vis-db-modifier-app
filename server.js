@@ -381,6 +381,96 @@ function createGroupedIntegrityDiagnostics(issues) {
   };
 }
 
+function cleanRelationshipArray(value) {
+  if (!Array.isArray(value)) return value;
+  return value.filter(item => !isDirtyRelationshipValue(item));
+}
+
+function relationshipArraysDiffer(before, after) {
+  if (!Array.isArray(before) || !Array.isArray(after)) return false;
+  if (before.length !== after.length) return true;
+  return before.some((item, index) => item !== after[index]);
+}
+
+function createDirtyRelationshipValueCleanupPreview(records) {
+  const changes = [];
+
+  records.forEach(record => {
+    const fieldChanges = {};
+
+    ROOT_RELATIONSHIP_FIELDS.forEach(field => {
+      if (!Array.isArray(record[field])) return;
+
+      const before = record[field];
+      const after = cleanRelationshipArray(before);
+
+      if (!relationshipArraysDiffer(before, after)) return;
+
+      fieldChanges[field] = {
+        before,
+        after,
+        removed: before.filter(item => isDirtyRelationshipValue(item)).map(describeRelationshipValue)
+      };
+    });
+
+    if (Object.keys(fieldChanges).length > 0) {
+      changes.push({
+        record: createRecordSummary(record),
+        changes: fieldChanges
+      });
+    }
+  });
+
+  return {
+    count: changes.length,
+    changes
+  };
+}
+
+async function applyDirtyRelationshipValueCleanup(collection) {
+  const records = await collection.find({}, {
+    projection: {
+      _id: 0,
+      id: 1,
+      parentId: 1,
+      children: 1,
+      info: 1
+    }
+  }).toArray();
+
+  const preview = createDirtyRelationshipValueCleanupPreview(records);
+
+  if (preview.changes.length === 0) {
+    return { matchedCount: 0, modifiedCount: 0, preview };
+  }
+
+  const operations = preview.changes.map(change => {
+    const setFields = {};
+
+    ROOT_RELATIONSHIP_FIELDS.forEach(field => {
+      const fieldChange = change.changes[field];
+      if (fieldChange) {
+        setFields[field] = fieldChange.after;
+      }
+    });
+
+    return {
+      updateOne: {
+        filter: { id: change.record.id },
+        update: { $set: setFields }
+      }
+    };
+  });
+
+  const result = await collection.bulkWrite(operations);
+
+  return {
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+    preview
+  };
+}
+
 function registerIdAndLabelGroups(record, recordsById, idGroups, duplicateLabelGroups, issues) {
   if (!record.id) {
     issues.recordsMissingId.push(createRecordSummary(record));
@@ -538,6 +628,9 @@ function buildIntegrityReport(records) {
     totalRecords: records.length,
     summary,
     groupedDiagnostics: createGroupedIntegrityDiagnostics(issues),
+    cleanupPreviews: {
+      dirtyRelationshipValues: createDirtyRelationshipValueCleanupPreview(records)
+    },
     issues
   };
 }
@@ -559,6 +652,49 @@ app.get('/api/reference/integrity-report', async (req, res) => {
     res.json(buildIntegrityReport(records));
   } catch (err) {
     console.error('Error building integrity report:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Preview-only endpoint for dirty relationship values. This does not write anything.
+app.get('/api/reference/dirty-relationship-values/preview', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const records = await collection.find({}, {
+      projection: {
+        _id: 0,
+        id: 1,
+        parentId: 1,
+        children: 1,
+        info: 1
+      }
+    }).toArray();
+
+    res.json(createDirtyRelationshipValueCleanupPreview(records));
+  } catch (err) {
+    console.error('Error previewing dirty relationship value cleanup:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Narrow cleanup endpoint: removes only null / undefined / empty-string relationship values.
+// It does not repair missing IDs, merge records, or touch any info fields.
+app.post('/api/reference/dirty-relationship-values/clean', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const result = await applyDirtyRelationshipValueCleanup(collection);
+
+    res.json({
+      success: true,
+      message: result.modifiedCount === 0
+        ? 'No dirty relationship values needed cleaning.'
+        : `Cleaned dirty relationship values in ${result.modifiedCount} record${result.modifiedCount === 1 ? '' : 's'}.`,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      preview: result.preview
+    });
+  } catch (err) {
+    console.error('Error cleaning dirty relationship values:', err);
     res.status(500).json({ error: err.toString() });
   }
 });
