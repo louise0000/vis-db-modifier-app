@@ -6,6 +6,16 @@ const path = require('path');
 const fs = require('fs');
 const { promises: fsp } = fs;
 const { v4: uuidv4 } = require('uuid');
+
+let GoogleCloudStorage = null;
+try {
+  ({ Storage: GoogleCloudStorage } = require('@google-cloud/storage'));
+} catch (err) {
+  // Optional dependency for the image queue cloud-finalise step.
+  // The app can still run without it; cloud upload routes return a setup error.
+  GoogleCloudStorage = null;
+}
+
 require('dotenv').config();
 
 // Connection URL
@@ -29,6 +39,7 @@ let latestDraftCapture = null;
 
 const IMAGE_CANDIDATE_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_CANDIDATE_PREVIEW_DIR = path.join(__dirname, 'public', '_image-candidate-preview');
+const IMAGE_CLOUD_DEFAULT_PREFIX = 'reference-images';
 
 const ROOT_RELATIONSHIP_FIELDS = ['parentId', 'children'];
 
@@ -88,6 +99,58 @@ function isBlockedImageCandidateHost(hostname = '') {
     || lower === '0.0.0.0'
     || lower === '::1'
     || lower.startsWith('127.');
+}
+
+function safeJoinUrlParts(...parts) {
+  return parts
+    .map(part => String(part || '').trim().replace(/^\/+|\/+$/g, ''))
+    .filter(Boolean)
+    .join('/');
+}
+
+function buildImageKitDeliveryUrl(objectName) {
+  const endpoint = String(process.env.IMAGEKIT_URL_ENDPOINT || '').trim().replace(/\/+$/g, '');
+  const pathPrefix = String(process.env.IMAGEKIT_URL_PATH_PREFIX || '').trim();
+
+  if (!endpoint) return '';
+
+  return `${endpoint}/${safeJoinUrlParts(pathPrefix, objectName)}`;
+}
+
+function getImageQueueCloudConfigStatus() {
+  const bucket = String(process.env.GCS_IMAGE_BUCKET || process.env.GCS_BUCKET_NAME || '').trim();
+  const imageKitEndpoint = String(process.env.IMAGEKIT_URL_ENDPOINT || '').trim();
+
+  return {
+    hasGoogleStoragePackage: Boolean(GoogleCloudStorage),
+    hasBucket: Boolean(bucket),
+    hasImageKitEndpoint: Boolean(imageKitEndpoint),
+    bucket,
+    gcsImagePrefix: String(process.env.GCS_IMAGE_PREFIX || IMAGE_CLOUD_DEFAULT_PREFIX).trim().replace(/^\/+|\/+$/g, '') || IMAGE_CLOUD_DEFAULT_PREFIX,
+    imageKitUrlEndpoint: imageKitEndpoint,
+    imageKitUrlPathPrefix: String(process.env.IMAGEKIT_URL_PATH_PREFIX || '').trim()
+  };
+}
+
+function getLocalImageCandidatePreviewPath(previewUrl = '') {
+  const rawPreviewUrl = String(previewUrl || '').trim();
+  const prefix = '/_image-candidate-preview/';
+
+  if (!rawPreviewUrl.startsWith(prefix)) {
+    return null;
+  }
+
+  const filename = path.basename(rawPreviewUrl.slice(prefix.length));
+  if (!filename) return null;
+
+  const filePath = path.resolve(IMAGE_CANDIDATE_PREVIEW_DIR, filename);
+  const previewDir = path.resolve(IMAGE_CANDIDATE_PREVIEW_DIR);
+
+  if (!filePath.startsWith(`${previewDir}${path.sep}`)) {
+    return null;
+  }
+
+  return { filename, filePath };
 }
 
 
@@ -1700,6 +1763,138 @@ app.post('/api/reference/image-queue/validate-image-candidate', async (req, res)
       ? 'Image request timed out.'
       : err.toString();
     res.status(500).json({ error: message });
+  }
+});
+
+
+app.get('/api/reference/image-queue/cloud-config', (req, res) => {
+  const status = getImageQueueCloudConfigStatus();
+  res.json({
+    ...status,
+    ready: status.hasGoogleStoragePackage && status.hasBucket && status.hasImageKitEndpoint,
+    installHint: status.hasGoogleStoragePackage ? '' : 'Run: npm install @google-cloud/storage',
+    credentialHint: process.env.GOOGLE_APPLICATION_CREDENTIALS
+      ? 'GOOGLE_APPLICATION_CREDENTIALS is set.'
+      : 'Set GOOGLE_APPLICATION_CREDENTIALS to a local service-account JSON path, or use your existing gcloud auth setup.'
+  });
+});
+
+// Upload a previously validated local image candidate to Google Cloud Storage,
+// construct the corresponding ImageKit delivery URL, and save it as info.imgURL.
+app.post('/api/reference/image-queue/finalise-image-candidate', async (req, res) => {
+  try {
+    const recordId = String(req.body?.recordId || '').trim();
+    const selectedImageCandidateUrl = String(req.body?.selectedImageCandidateUrl || '').trim();
+    const selectedDownload = req.body?.selectedImageCandidateDownload || {};
+    const previewUrl = String(selectedDownload?.previewUrl || '').trim();
+
+    if (!recordId) {
+      return res.status(400).json({ error: 'recordId is required.' });
+    }
+
+    if (!selectedImageCandidateUrl) {
+      return res.status(400).json({ error: 'selectedImageCandidateUrl is required.' });
+    }
+
+    const config = getImageQueueCloudConfigStatus();
+    if (!config.hasGoogleStoragePackage) {
+      return res.status(503).json({ error: 'Google Cloud Storage package is not installed. Run: npm install @google-cloud/storage' });
+    }
+
+    if (!config.hasBucket) {
+      return res.status(503).json({ error: 'Set GCS_IMAGE_BUCKET or GCS_BUCKET_NAME in .env before uploading images.' });
+    }
+
+    if (!config.hasImageKitEndpoint) {
+      return res.status(503).json({ error: 'Set IMAGEKIT_URL_ENDPOINT in .env before saving an ImageKit delivery URL.' });
+    }
+
+    const localPreview = getLocalImageCandidatePreviewPath(previewUrl);
+    if (!localPreview) {
+      return res.status(400).json({ error: 'selectedImageCandidateDownload.previewUrl must point to a local _image-candidate-preview file.' });
+    }
+
+    try {
+      await fsp.access(localPreview.filePath, fs.constants.R_OK);
+    } catch (err) {
+      return res.status(404).json({ error: 'Local preview file was not found. Validate/download the image again before uploading.' });
+    }
+
+    const collection = db.collection('reference');
+    const record = await collection.findOne({ id: recordId });
+    if (!record) {
+      return res.status(404).json({ error: 'Record not found.' });
+    }
+
+    const info = record.info || {};
+    const label = String(info.label || req.body?.label || recordId || 'image').trim();
+    const type = String(info.type || 'record').trim();
+    const ext = path.extname(localPreview.filename).replace(/^\./, '') || 'jpg';
+    const objectName = safeJoinUrlParts(
+      config.gcsImagePrefix,
+      type,
+      `${slugifyImageCandidateLabel(label)}-${recordId}.${ext}`
+    );
+
+    const storage = new GoogleCloudStorage();
+    const bucket = storage.bucket(config.bucket);
+    const contentType = String(selectedDownload?.contentType || '').trim() || undefined;
+
+    await bucket.upload(localPreview.filePath, {
+      destination: objectName,
+      metadata: {
+        contentType,
+        metadata: {
+          sourceUrl: selectedImageCandidateUrl,
+          recordId,
+          recordLabel: label
+        }
+      }
+    });
+
+    const deliveryUrl = buildImageKitDeliveryUrl(objectName);
+    const savedAt = new Date().toISOString();
+    const previousSourceMeta = record.sourceMeta && typeof record.sourceMeta === 'object' && !Array.isArray(record.sourceMeta)
+      ? record.sourceMeta
+      : {};
+
+    const imageSource = {
+      method: 'manual-image-candidate',
+      selectedAt: savedAt,
+      originalImageUrl: selectedImageCandidateUrl,
+      downloadedFinalUrl: selectedDownload?.finalUrl || selectedImageCandidateUrl,
+      localPreviewUrl: previewUrl,
+      gcsBucket: config.bucket,
+      gcsObjectName: objectName,
+      imageKitUrl: deliveryUrl,
+      contentType: contentType || '',
+      sizeBytes: selectedDownload?.sizeBytes || null
+    };
+
+    await collection.updateOne(
+      { id: recordId },
+      {
+        $set: {
+          'info.imgURL': deliveryUrl,
+          sourceMeta: {
+            ...previousSourceMeta,
+            imageSource
+          }
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      recordId,
+      imgURL: deliveryUrl,
+      gcsBucket: config.bucket,
+      gcsObjectName: objectName,
+      imageSource
+    });
+  } catch (err) {
+    console.error('Error finalising image candidate:', err);
+    res.status(500).json({ error: err.toString() });
   }
 });
 

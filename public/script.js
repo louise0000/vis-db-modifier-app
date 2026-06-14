@@ -2765,8 +2765,11 @@ function normaliseImageQueueRecord(record) {
         imageCandidates: Array.isArray(record?.imageCandidates) ? record.imageCandidates : [],
         selectedImageCandidateUrl: record?.selectedImageCandidateUrl || '',
         selectedImageCandidateDownload: record?.selectedImageCandidateDownload || null,
+        selectedImageCandidateCloud: record?.selectedImageCandidateCloud || null,
         imageCandidateDownloadStatus: record?.imageCandidateDownloadStatus || '',
         imageCandidateDownloadError: record?.imageCandidateDownloadError || '',
+        imageCandidateCloudStatus: record?.imageCandidateCloudStatus || '',
+        imageCandidateCloudError: record?.imageCandidateCloudError || '',
         imageCandidatesRejected: Boolean(record?.imageCandidatesRejected),
         manualCandidateText: record?.manualCandidateText || '',
         raw: record
@@ -2820,6 +2823,14 @@ function clearImageCandidateDownloadState(record) {
     record.selectedImageCandidateDownload = null;
     record.imageCandidateDownloadStatus = '';
     record.imageCandidateDownloadError = '';
+    clearImageCandidateCloudState(record);
+}
+
+function clearImageCandidateCloudState(record) {
+    if (!record) return;
+    record.selectedImageCandidateCloud = null;
+    record.imageCandidateCloudStatus = '';
+    record.imageCandidateCloudError = '';
 }
 
 function renderLocalImageCandidatePreview(downloadInfo) {
@@ -2860,6 +2871,94 @@ function renderLocalImageCandidatePreview(downloadInfo) {
     return container;
 }
 
+function renderCloudImageCandidateResult(cloudInfo) {
+    if (!cloudInfo || !cloudInfo.imgURL) return null;
+
+    const container = document.createElement('div');
+    container.classList.add('image-candidate-cloud-result');
+
+    const image = document.createElement('img');
+    image.src = cloudInfo.imgURL;
+    image.alt = 'Saved ImageKit image preview';
+    container.appendChild(image);
+
+    const details = document.createElement('div');
+
+    const heading = document.createElement('p');
+    heading.innerHTML = '<strong>Cloud image saved</strong>';
+    details.appendChild(heading);
+
+    const objectInfo = document.createElement('p');
+    objectInfo.textContent = cloudInfo.gcsObjectName || 'Google Cloud object saved.';
+    details.appendChild(objectInfo);
+
+    const openLink = document.createElement('a');
+    openLink.href = cloudInfo.imgURL;
+    openLink.target = '_blank';
+    openLink.rel = 'noopener noreferrer';
+    openLink.textContent = 'Open ImageKit URL';
+    details.appendChild(openLink);
+
+    container.appendChild(details);
+    return container;
+}
+
+async function finaliseSelectedImageCandidate(record) {
+    if (!record || !record.id) {
+        alert('This queued record does not have an id, so it cannot be updated safely.');
+        return;
+    }
+
+    if (!record.selectedImageCandidateUrl || !record.selectedImageCandidateDownload?.previewUrl) {
+        alert('Validate/download a selected candidate before uploading it to cloud storage.');
+        return;
+    }
+
+    const confirmed = confirm('Upload this selected local preview to Google Cloud Storage and save the ImageKit URL to this record?');
+    if (!confirmed) return;
+
+    record.imageCandidateCloudStatus = 'uploading';
+    record.imageCandidateCloudError = '';
+    record.selectedImageCandidateCloud = null;
+    renderImageQueue();
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/image-queue/finalise-image-candidate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                recordId: record.id,
+                label: record.label,
+                selectedImageCandidateUrl: record.selectedImageCandidateUrl,
+                selectedImageCandidateDownload: record.selectedImageCandidateDownload
+            })
+        });
+
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (jsonError) {
+            payload = null;
+        }
+
+        if (!response.ok) {
+            throw new Error(payload?.error || `Cloud image finalise failed with status ${response.status}.`);
+        }
+
+        record.selectedImageCandidateCloud = payload;
+        record.imageCandidateCloudStatus = 'saved';
+        record.imageCandidateCloudError = '';
+        record.imgURL = payload.imgURL || record.imgURL;
+    } catch (error) {
+        console.error('Error uploading/saving selected image candidate:', error);
+        record.selectedImageCandidateCloud = null;
+        record.imageCandidateCloudStatus = 'error';
+        record.imageCandidateCloudError = error.message || String(error);
+    }
+
+    renderImageQueue();
+}
+
 async function validateSelectedImageCandidate(record) {
     if (!record || !record.selectedImageCandidateUrl) {
         alert('Select an image candidate before validating/downloading.');
@@ -2896,6 +2995,7 @@ async function validateSelectedImageCandidate(record) {
         record.selectedImageCandidateDownload = payload;
         record.imageCandidateDownloadStatus = 'downloaded';
         record.imageCandidateDownloadError = '';
+        clearImageCandidateCloudState(record);
     } catch (error) {
         console.error('Error validating/downloading selected image candidate:', error);
         record.selectedImageCandidateDownload = null;
@@ -2917,7 +3017,7 @@ function renderImageCandidateReview(record) {
 
     const help = document.createElement('p');
     help.classList.add('image-candidate-help-text');
-    help.textContent = 'Paste up to five image URLs, one per line. You can preview/select, then validate-download the selected image to a local temp file only.';
+    help.textContent = 'Paste up to five image URLs, one per line. You can preview/select, validate-download, then optionally upload the selected local preview to cloud storage.';
     container.appendChild(help);
 
     const textarea = document.createElement('textarea');
@@ -2971,10 +3071,17 @@ function renderImageCandidateReview(record) {
 
     const status = document.createElement('div');
     status.classList.add('image-candidate-status');
-    if (record.imageCandidateDownloadStatus === 'downloading') {
+    if (record.imageCandidateCloudStatus === 'uploading') {
+        status.textContent = 'Uploading selected local preview to cloud storage and saving ImageKit URL...';
+    } else if (record.imageCandidateCloudStatus === 'saved') {
+        status.textContent = 'Cloud image saved to this record.';
+    } else if (record.imageCandidateCloudStatus === 'error') {
+        status.classList.add('image-candidate-download-error');
+        status.textContent = `Cloud save failed: ${record.imageCandidateCloudError || 'Unknown error.'}`;
+    } else if (record.imageCandidateDownloadStatus === 'downloading') {
         status.textContent = 'Validating and downloading selected image to a local temp preview...';
     } else if (record.imageCandidateDownloadStatus === 'downloaded') {
-        status.textContent = 'Selected image was downloaded to local temp preview. No database write yet.';
+        status.textContent = 'Selected image was downloaded to local temp preview. Ready for cloud upload if configured.';
     } else if (record.imageCandidateDownloadStatus === 'error') {
         status.classList.add('image-candidate-download-error');
         status.textContent = `Download failed: ${record.imageCandidateDownloadError || 'Unknown error.'}`;
@@ -2992,6 +3099,9 @@ function renderImageCandidateReview(record) {
     const localPreview = renderLocalImageCandidatePreview(record.selectedImageCandidateDownload);
     if (localPreview) container.appendChild(localPreview);
 
+    const cloudResult = renderCloudImageCandidateResult(record.selectedImageCandidateCloud);
+    if (cloudResult) container.appendChild(cloudResult);
+
     if (record.selectedImageCandidateUrl) {
         const downloadActions = document.createElement('div');
         downloadActions.classList.add('image-candidate-actions');
@@ -3004,6 +3114,17 @@ function renderImageCandidateReview(record) {
         downloadButton.disabled = record.imageCandidateDownloadStatus === 'downloading';
         downloadButton.addEventListener('click', () => validateSelectedImageCandidate(record));
         downloadActions.appendChild(downloadButton);
+
+        if (record.selectedImageCandidateDownload?.previewUrl) {
+            const finaliseButton = document.createElement('button');
+            finaliseButton.type = 'button';
+            finaliseButton.textContent = record.imageCandidateCloudStatus === 'uploading'
+                ? 'Uploading...'
+                : 'Upload to Cloud + Save imgURL';
+            finaliseButton.disabled = record.imageCandidateCloudStatus === 'uploading';
+            finaliseButton.addEventListener('click', () => finaliseSelectedImageCandidate(record));
+            downloadActions.appendChild(finaliseButton);
+        }
 
         container.appendChild(downloadActions);
     }
@@ -3279,7 +3400,9 @@ function renderImageQueryPreview() {
         if (record.selectedImageCandidateUrl || record.imageCandidatesRejected) {
             const imageStatus = document.createElement('div');
             imageStatus.classList.add('image-query-selected-candidate');
-            if (record.selectedImageCandidateUrl && record.selectedImageCandidateDownload?.previewUrl) {
+            if (record.selectedImageCandidateCloud?.imgURL) {
+                imageStatus.textContent = `Saved ImageKit URL: ${record.selectedImageCandidateCloud.imgURL}`;
+            } else if (record.selectedImageCandidateUrl && record.selectedImageCandidateDownload?.previewUrl) {
                 imageStatus.textContent = `Selected candidate downloaded to local temp preview: ${record.selectedImageCandidateDownload.previewUrl}`;
             } else {
                 imageStatus.textContent = record.selectedImageCandidateUrl
