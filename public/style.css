@@ -793,3 +793,33 @@ nav ul li a:hover {
     padding: 8px;
     border-radius: 6px;
 }
+
+
+/* Draft duplicate preflight */
+.draft-duplicate-preflight {
+    margin-top: 14px;
+    padding: 10px;
+    background: #ffe9e988;
+    border: 1px solid #5f2c2c55;
+    border-radius: 8px;
+}
+
+.draft-duplicate-list {
+    list-style: disc;
+    margin: 8px 0 8px 20px;
+    padding-left: 16px;
+}
+
+.draft-duplicate-list li {
+    margin-bottom: 4px;
+    line-height: 1.35;
+}
+
+.draft-duplicate-acknowledgement {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    margin-top: 8px;
+    font-size: 13px;
+    font-weight: bold;
+}

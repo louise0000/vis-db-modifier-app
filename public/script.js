@@ -121,7 +121,13 @@ const testDraftRecord = {
     duplicateWarnings: []
 };
 
+let currentDraftDuplicateCandidates = [];
+let currentDraftDuplicateReviewAcknowledged = false;
+
+
 function clearDraftSourceMetadata() {
+    currentDraftDuplicateCandidates = [];
+    currentDraftDuplicateReviewAcknowledged = false;
     const panel = document.getElementById('draft-source-metadata');
     if (!panel) return;
     panel.innerHTML = '';
@@ -166,6 +172,129 @@ function appendDraftMetadataList(panel, headingText, fields, className) {
     });
 
     panel.appendChild(rawList);
+}
+
+
+function getDraftProposedLabel(draftRecord = {}) {
+    return (draftRecord.proposedInfo?.label || draftRecord.sourceMeta?.raw?.title || '').trim();
+}
+
+function getDraftProposedType(draftRecord = {}) {
+    return (draftRecord.proposedType || draftRecord.proposedInfo?.type || '').trim();
+}
+
+function formatDraftDuplicateCandidate(candidate = {}) {
+    const info = candidate.info || {};
+    const label = info.label || '(untitled)';
+    const type = info.type ? ` [${info.type}]` : '';
+    const date = info.date || info.birth || info.death
+        ? ` (${[info.date, info.birth, info.death].filter(Boolean).join('–')})`
+        : '';
+    const id = candidate.id ? ` — ${candidate.id.slice(0, 8)}…${candidate.id.slice(-4)}` : '';
+    return `${label}${date}${type}${id}`;
+}
+
+function isMeaningfulDraftDuplicate(candidate = {}, draftRecord = {}) {
+    const info = candidate.info || {};
+    const candidateLabel = (info.label || '').trim().toLowerCase();
+    const candidateType = (info.type || '').trim().toLowerCase();
+    const draftLabel = getDraftProposedLabel(draftRecord).toLowerCase();
+    const draftType = getDraftProposedType(draftRecord).toLowerCase();
+
+    if (!candidateLabel || !draftLabel) return false;
+    if (draftType && candidateType && draftType !== candidateType) return false;
+
+    // Existing fuzzy search is deliberately broad. Keep the preflight list focused
+    // enough that it is a warning, not another giant search result dump.
+    return candidateLabel.includes(draftLabel) || draftLabel.includes(candidateLabel);
+}
+
+function appendDraftDuplicatePreflight(panel, candidates = []) {
+    const existing = panel.querySelector('.draft-duplicate-preflight');
+    if (existing) existing.remove();
+
+    const section = document.createElement('div');
+    section.classList.add('draft-duplicate-preflight');
+
+    const heading = document.createElement('h5');
+    heading.textContent = 'Possible existing records';
+    section.appendChild(heading);
+
+    if (!candidates.length) {
+        const message = document.createElement('p');
+        message.classList.add('draft-source-help-text');
+        message.textContent = 'No obvious existing record found for this draft label/type.';
+        section.appendChild(message);
+        panel.appendChild(section);
+        return;
+    }
+
+    const help = document.createElement('p');
+    help.classList.add('draft-source-help-text');
+    help.textContent = 'Review these before saving. This does not block saving, but it warns you if the incoming draft may already exist.';
+    section.appendChild(help);
+
+    const list = document.createElement('ul');
+    list.classList.add('draft-duplicate-list');
+    candidates.forEach(candidate => {
+        const item = document.createElement('li');
+        item.textContent = formatDraftDuplicateCandidate(candidate);
+        list.appendChild(item);
+    });
+    section.appendChild(list);
+
+    const acknowledgementLabel = document.createElement('label');
+    acknowledgementLabel.classList.add('draft-duplicate-acknowledgement');
+    const acknowledgement = document.createElement('input');
+    acknowledgement.type = 'checkbox';
+    acknowledgement.checked = currentDraftDuplicateReviewAcknowledged;
+    acknowledgement.addEventListener('change', () => {
+        currentDraftDuplicateReviewAcknowledged = acknowledgement.checked;
+    });
+    acknowledgementLabel.appendChild(acknowledgement);
+    acknowledgementLabel.appendChild(document.createTextNode(' I reviewed these possible duplicates.'));
+    section.appendChild(acknowledgementLabel);
+
+    panel.appendChild(section);
+}
+
+async function runDraftDuplicatePreflight(draftRecord = {}) {
+    const panel = document.getElementById('draft-source-metadata');
+    if (!panel) return [];
+
+    const label = getDraftProposedLabel(draftRecord);
+    currentDraftDuplicateCandidates = [];
+    currentDraftDuplicateReviewAcknowledged = false;
+
+    if (!label) {
+        appendDraftDuplicatePreflight(panel, []);
+        return [];
+    }
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(label)}`);
+        const results = await response.json();
+        if (!response.ok) throw new Error(results.error || 'Duplicate preflight failed.');
+
+        currentDraftDuplicateCandidates = Array.isArray(results)
+            ? results.filter(candidate => isMeaningfulDraftDuplicate(candidate, draftRecord)).slice(0, 8)
+            : [];
+        appendDraftDuplicatePreflight(panel, currentDraftDuplicateCandidates);
+        return currentDraftDuplicateCandidates;
+    } catch (error) {
+        console.error('Error running draft duplicate preflight:', error);
+        const section = document.createElement('div');
+        section.classList.add('draft-duplicate-preflight');
+        const heading = document.createElement('h5');
+        heading.textContent = 'Possible existing records';
+        const message = document.createElement('p');
+        message.classList.add('draft-source-help-text');
+        message.textContent = 'Duplicate preflight could not run. You can still review manually before saving.';
+        section.appendChild(heading);
+        section.appendChild(message);
+        panel.appendChild(section);
+        return [];
+    }
 }
 
 function renderDraftSourceMetadata(draftRecord = {}, templateRecord = {}) {
@@ -269,6 +398,7 @@ async function loadDraftRecordIntoAddForm(draftRecord) {
         typeSelect.value = selectedType;
         generateForm(createDraftTemplateRecord(templateRecord, draftRecord));
         renderDraftSourceMetadata(draftRecord, templateRecord);
+        await runDraftDuplicatePreflight(draftRecord);
         recordForm.style.display = 'block';
     } catch (error) {
         console.error('Error loading draft record:', error);
@@ -1065,6 +1195,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         newRecord.info = ensureJapaneseNoteField(info);
+
+        if (currentDraftDuplicateCandidates.length && !currentDraftDuplicateReviewAcknowledged) {
+            const shouldContinue = confirm(
+                `This draft has ${currentDraftDuplicateCandidates.length} possible existing record(s). ` +
+                'Review them in Imported Source Metadata before saving. Continue anyway?'
+            );
+            if (!shouldContinue) return;
+        }
     
         try {
             const response = await fetch(`${baseURL}/api/reference/new`, {
