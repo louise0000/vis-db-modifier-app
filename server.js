@@ -54,6 +54,39 @@ function normaliseInfo(info = {}) {
   return nextInfo;
 }
 
+
+function normaliseSourceMeta(sourceMeta = null) {
+  if (!sourceMeta || typeof sourceMeta !== 'object' || Array.isArray(sourceMeta)) {
+    return null;
+  }
+
+  const safeObject = value => (
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...value }
+      : {}
+  );
+
+  const nextSourceMeta = {
+    source: typeof sourceMeta.source === 'string' ? sourceMeta.source : 'unknown-draft-source',
+    capturedAt: typeof sourceMeta.capturedAt === 'string' ? sourceMeta.capturedAt : '',
+    acceptedAt: typeof sourceMeta.acceptedAt === 'string' ? sourceMeta.acceptedAt : new Date().toISOString(),
+    proposedType: typeof sourceMeta.proposedType === 'string' ? sourceMeta.proposedType : '',
+    mappedFields: safeObject(sourceMeta.mappedFields),
+    unmappedFields: safeObject(sourceMeta.unmappedFields),
+    raw: safeObject(sourceMeta.raw),
+    note: typeof sourceMeta.note === 'string' ? sourceMeta.note : ''
+  };
+
+  const hasMeaningfulData = nextSourceMeta.source
+    || nextSourceMeta.capturedAt
+    || nextSourceMeta.proposedType
+    || Object.keys(nextSourceMeta.mappedFields).length
+    || Object.keys(nextSourceMeta.unmappedFields).length
+    || Object.keys(nextSourceMeta.raw).length;
+
+  return hasMeaningfulData ? nextSourceMeta : null;
+}
+
 client.connect().then(() => {
   db = client.db(dbName);
   console.log('Connected to MongoDB');
@@ -1568,6 +1601,13 @@ app.post('/api/reference/new', async (req, res) => {
       newRecord.parentId = normaliseRelationshipArray(newRecord.parentId);
       newRecord.children = normaliseRelationshipArray(newRecord.children);
       newRecord.info = normaliseInfo(newRecord.info || {});
+
+      const sourceMeta = normaliseSourceMeta(newRecord.sourceMeta);
+      if (sourceMeta) {
+          newRecord.sourceMeta = sourceMeta;
+      } else {
+          delete newRecord.sourceMeta;
+      }
       
       // Start a transaction
       session.startTransaction();
