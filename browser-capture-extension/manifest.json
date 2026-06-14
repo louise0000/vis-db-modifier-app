@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Modifier Draft Capture",
+  "version": "0.1.0",
+  "description": "Capture the current web page as a draft record for the local database modifier app.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://localhost:3002/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "Capture draft record",
+    "default_popup": "popup.html"
+  }
+}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Draft Capture</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>Draft Capture</h1>
+
+    <label for="capture-type">Record type</label>
+    <select id="capture-type">
+      <option value="auto">Auto</option>
+      <option value="theorist">theorist</option>
+      <option value="artist">artist</option>
+      <option value="artworkBook">artworkBook</option>
+      <option value="keyword">keyword</option>
+      <option value="paradigm">paradigm</option>
+    </select>
+
+    <label for="modifier-port">Modifier app port</label>
+    <input id="modifier-port" type="text" value="3000" inputmode="numeric">
+
+    <button id="capture-page" type="button">Capture Current Page</button>
+
+    <p id="status" class="status">Ready.</p>
+
+    <details>
+      <summary>Preview payload</summary>
+      <pre id="payload-preview"></pre>
+    </details>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>
