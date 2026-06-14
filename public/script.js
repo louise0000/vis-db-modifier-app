@@ -2773,8 +2773,6 @@ function normaliseImageQueueRecord(record) {
         imageCandidateDownloadError: record?.imageCandidateDownloadError || '',
         imageCandidateCloudStatus: record?.imageCandidateCloudStatus || '',
         imageCandidateCloudError: record?.imageCandidateCloudError || '',
-        imageCandidatesRejected: Boolean(record?.imageCandidatesRejected),
-        manualCandidateText: record?.manualCandidateText || '',
         lastImageCandidateQuery: record?.lastImageCandidateQuery || '',
         raw: record
     };
@@ -2799,41 +2797,23 @@ function buildImageSearchQuery(record) {
         ? [record.birth, record.death].filter(Boolean).join(' ')
         : record.date;
 
+    const rawInfo = getImageQueueInfo(record?.raw || record);
+    const classificationText = [
+        record.type,
+        rawInfo.type,
+        rawInfo.subtype,
+        rawInfo.category,
+        rawInfo.medium,
+        rawInfo.format,
+        rawInfo.genre
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    const looksLikePublication = /\b(book|publication|catalogue|catalog|journal|article|essay|text|monograph|chapter|volume)\b/.test(classificationText);
     const hint = (record.type === 'theorist' || record.type === 'artist')
         ? 'portrait'
-        : (record.type === 'artworkBook' ? 'book cover' : 'image');
+        : (record.type === 'artworkBook' ? (looksLikePublication ? 'cover image' : 'artwork image') : 'image');
 
     return [label, datePart, hint].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-}
-
-function parseManualImageCandidateUrls(rawText) {
-    const seen = new Set();
-
-    return String(rawText || '')
-        .split(/\n+/)
-        .map(url => url.trim())
-        .filter(Boolean)
-        .filter(url => /^https?:\/\//i.test(url))
-        .filter(url => {
-            if (seen.has(url)) return false;
-            seen.add(url);
-            return true;
-        })
-        .slice(0, 5);
-}
-
-
-function normaliseImageCandidateDetailsFromUrls(urls = [], provider = 'manual') {
-    return urls.map((url, index) => ({
-        imageUrl: url,
-        originalUrl: url,
-        thumbnailUrl: url,
-        title: '',
-        source: provider === 'manual' ? 'Manual URL' : '',
-        sourcePageUrl: '',
-        provider,
-        position: index + 1
-    }));
 }
 
 function getImageCandidateDetail(record, url) {
@@ -2858,7 +2838,6 @@ async function fetchSerpApiImageCandidatesForRecord(record) {
 
     record.imageCandidateFetchStatus = 'fetching';
     record.imageCandidateFetchError = '';
-    record.imageCandidatesRejected = false;
     renderImageQueue();
 
     try {
@@ -2902,15 +2881,13 @@ async function fetchSerpApiImageCandidatesForRecord(record) {
         const previousSelection = record.selectedImageCandidateUrl;
         record.imageCandidates = urls;
         record.imageCandidateDetails = candidates.slice(0, 5);
-        record.manualCandidateText = '';
         record.selectedImageCandidateUrl = urls.includes(record.selectedImageCandidateUrl)
             ? record.selectedImageCandidateUrl
             : '';
         if (previousSelection !== record.selectedImageCandidateUrl) {
             clearImageCandidateDownloadState(record);
         }
-        record.imageCandidatesRejected = false;
-        record.imageCandidateFetchStatus = 'loaded';
+            record.imageCandidateFetchStatus = 'loaded';
         record.imageCandidateFetchError = '';
         record.lastImageCandidateQuery = payload.query || query;
     } catch (error) {
@@ -3018,7 +2995,7 @@ function renderCloudImageCandidateResult(cloudInfo) {
     return container;
 }
 
-async function finaliseSelectedImageCandidate(record) {
+async function finaliseSelectedImageCandidate(record, options = {}) {
     if (!record || !record.id) {
         alert('This queued record does not have an id, so it cannot be updated safely.');
         return;
@@ -3029,13 +3006,15 @@ async function finaliseSelectedImageCandidate(record) {
         return;
     }
 
-    const confirmed = confirm('Upload this selected local preview to Google Cloud Storage and save the ImageKit URL to this record?');
-    if (!confirmed) return;
+    if (!options.skipConfirm) {
+        const confirmed = confirm('Upload this selected local preview to Google Cloud Storage and save the ImageKit URL to this record?');
+        if (!confirmed) return;
+    }
 
     record.imageCandidateCloudStatus = 'uploading';
     record.imageCandidateCloudError = '';
     record.selectedImageCandidateCloud = null;
-    renderImageQueue();
+    if (!options.suppressRender) renderImageQueue();
 
     try {
         const response = await fetch(`${baseURL}/api/reference/image-queue/finalise-image-candidate`, {
@@ -3072,10 +3051,10 @@ async function finaliseSelectedImageCandidate(record) {
         record.imageCandidateCloudError = error.message || String(error);
     }
 
-    renderImageQueue();
+    if (!options.suppressRender) renderImageQueue();
 }
 
-async function validateSelectedImageCandidate(record) {
+async function validateSelectedImageCandidate(record, options = {}) {
     if (!record || !record.selectedImageCandidateUrl) {
         alert('Select an image candidate before validating/downloading.');
         return;
@@ -3084,7 +3063,7 @@ async function validateSelectedImageCandidate(record) {
     record.imageCandidateDownloadStatus = 'downloading';
     record.imageCandidateDownloadError = '';
     record.selectedImageCandidateDownload = null;
-    renderImageQueue();
+    if (!options.suppressRender) renderImageQueue();
 
     try {
         const response = await fetch(`${baseURL}/api/reference/image-queue/validate-image-candidate`, {
@@ -3119,7 +3098,48 @@ async function validateSelectedImageCandidate(record) {
         record.imageCandidateDownloadError = error.message || String(error);
     }
 
+    if (!options.suppressRender) renderImageQueue();
+}
+
+async function saveSelectedImageCandidatesForQueue() {
+    const selectedRecords = imageQueueRecords.filter(record => record.selectedImageCandidateUrl && record.id);
+
+    if (!selectedRecords.length) {
+        alert('Select one image candidate for at least one queued record before saving.');
+        return;
+    }
+
+    const confirmed = confirm(`Validate/download and save selected images for ${selectedRecords.length} queued record${selectedRecords.length === 1 ? '' : 's'}?`);
+    if (!confirmed) return;
+
+    for (const record of selectedRecords) {
+        if (record.imageCandidateCloudStatus === 'saved') continue;
+
+        try {
+            if (!record.selectedImageCandidateDownload?.previewUrl) {
+                await validateSelectedImageCandidate(record, { suppressRender: true });
+            }
+
+            if (record.selectedImageCandidateDownload?.previewUrl) {
+                await finaliseSelectedImageCandidate(record, { skipConfirm: true, suppressRender: true });
+            }
+        } catch (error) {
+            console.error('Error saving selected queued image:', error);
+            record.imageCandidateCloudStatus = 'error';
+            record.imageCandidateCloudError = error.message || String(error);
+        }
+
+        renderImageQueue();
+    }
+
     renderImageQueue();
+}
+
+function formatImageCandidateDimensions(detail = {}) {
+    const width = detail.originalWidth || detail.width || '';
+    const height = detail.originalHeight || detail.height || '';
+    if (!width || !height) return 'size ?';
+    return `${width}×${height}`;
 }
 
 function renderImageCandidateReview(record) {
@@ -3128,81 +3148,20 @@ function renderImageCandidateReview(record) {
 
     const heading = document.createElement('div');
     heading.classList.add('image-candidate-heading');
-    heading.textContent = 'Image candidates';
+    heading.textContent = 'Candidate review';
     container.appendChild(heading);
 
     const help = document.createElement('p');
     help.classList.add('image-candidate-help-text');
-    help.textContent = 'Fetch Google Images candidates through SerpApi, or paste fallback image URLs manually. Select one, validate/download it, then upload the local preview to cloud storage.';
+    help.textContent = 'Select one SerpApi candidate. The queue-level save button will validate/download and upload selected images to storage, then write the ImageKit URL to the database.';
     container.appendChild(help);
-
-    const textarea = document.createElement('textarea');
-    textarea.classList.add('image-candidate-url-input');
-    textarea.placeholder = 'https://example.com/image-1.jpg\nhttps://example.com/image-2.jpg';
-    textarea.value = record.manualCandidateText || record.imageCandidates.join('\n');
-    textarea.addEventListener('input', () => {
-        record.manualCandidateText = textarea.value;
-    });
-    container.appendChild(textarea);
-
-    const actions = document.createElement('div');
-    actions.classList.add('image-candidate-actions');
-
-    const fetchButton = document.createElement('button');
-    fetchButton.type = 'button';
-    fetchButton.textContent = record.imageCandidateFetchStatus === 'fetching'
-        ? 'Fetching...'
-        : 'Fetch SerpApi Candidates';
-    fetchButton.disabled = record.imageCandidateFetchStatus === 'fetching';
-    fetchButton.addEventListener('click', () => fetchSerpApiImageCandidatesForRecord(record));
-    actions.appendChild(fetchButton);
-
-    const previewButton = document.createElement('button');
-    previewButton.type = 'button';
-    previewButton.textContent = 'Preview Candidate URLs';
-    previewButton.addEventListener('click', () => {
-        const urls = parseManualImageCandidateUrls(textarea.value);
-        if (!urls.length) {
-            alert('Paste at least one valid http/https image URL.');
-            return;
-        }
-
-        record.manualCandidateText = textarea.value;
-        record.imageCandidates = urls;
-        record.imageCandidateDetails = normaliseImageCandidateDetailsFromUrls(urls);
-        clearImageCandidateFetchState(record);
-        record.lastImageCandidateQuery = '';
-        const previousSelection = record.selectedImageCandidateUrl;
-        record.selectedImageCandidateUrl = urls.includes(record.selectedImageCandidateUrl)
-            ? record.selectedImageCandidateUrl
-            : '';
-        if (previousSelection !== record.selectedImageCandidateUrl) {
-            clearImageCandidateDownloadState(record);
-        }
-        record.imageCandidatesRejected = false;
-        renderImageQueue();
-    });
-    actions.appendChild(previewButton);
-
-    const rejectButton = document.createElement('button');
-    rejectButton.type = 'button';
-    rejectButton.textContent = 'Reject All';
-    rejectButton.addEventListener('click', () => {
-        record.selectedImageCandidateUrl = '';
-        clearImageCandidateDownloadState(record);
-        record.imageCandidatesRejected = true;
-        renderImageQueue();
-    });
-    actions.appendChild(rejectButton);
-
-    container.appendChild(actions);
 
     const status = document.createElement('div');
     status.classList.add('image-candidate-status');
     if (record.imageCandidateFetchStatus === 'fetching') {
         status.textContent = `Fetching SerpApi image candidates for: ${buildImageSearchQuery(record)}`;
     } else if (record.imageCandidateFetchStatus === 'loaded') {
-        status.textContent = `SerpApi candidates loaded${record.lastImageCandidateQuery ? ` for: ${record.lastImageCandidateQuery}` : ''}. Choose one candidate or reject all.`;
+        status.textContent = `SerpApi candidates loaded${record.lastImageCandidateQuery ? ` for: ${record.lastImageCandidateQuery}` : ''}.`;
     } else if (record.imageCandidateFetchStatus === 'empty') {
         status.classList.add('image-candidate-download-error');
         status.textContent = `SerpApi returned no candidates${record.lastImageCandidateQuery ? ` for: ${record.lastImageCandidateQuery}` : ''}.`;
@@ -3219,18 +3178,16 @@ function renderImageCandidateReview(record) {
     } else if (record.imageCandidateDownloadStatus === 'downloading') {
         status.textContent = 'Validating and downloading selected image to a local temp preview...';
     } else if (record.imageCandidateDownloadStatus === 'downloaded') {
-        status.textContent = 'Selected image was downloaded to local temp preview. Ready for cloud upload if configured.';
+        status.textContent = 'Selected image downloaded to local temp preview. It can now be saved to cloud/database.';
     } else if (record.imageCandidateDownloadStatus === 'error') {
         status.classList.add('image-candidate-download-error');
         status.textContent = `Download failed: ${record.imageCandidateDownloadError || 'Unknown error.'}`;
     } else if (record.selectedImageCandidateUrl) {
-        status.textContent = 'Selected candidate only. No database write yet.';
-    } else if (record.imageCandidatesRejected) {
-        status.textContent = 'All candidates rejected for this queue session.';
+        status.textContent = 'Selected candidate. Use “Save Selected Images to Database” when the queue selections look right.';
     } else if (record.imageCandidates.length) {
-        status.textContent = 'Preview loaded. Choose one candidate or reject all.';
+        status.textContent = 'Choose one candidate for this record, or leave it unselected to skip it.';
     } else {
-        status.textContent = 'No candidates previewed yet.';
+        status.textContent = 'No candidates fetched yet.';
     }
     container.appendChild(status);
 
@@ -3240,31 +3197,41 @@ function renderImageCandidateReview(record) {
     const cloudResult = renderCloudImageCandidateResult(record.selectedImageCandidateCloud);
     if (cloudResult) container.appendChild(cloudResult);
 
-    if (record.selectedImageCandidateUrl) {
-        const downloadActions = document.createElement('div');
-        downloadActions.classList.add('image-candidate-actions');
+    if (record.selectedImageCandidateUrl && record.imageCandidateCloudStatus !== 'saved') {
+        const selectedActions = document.createElement('div');
+        selectedActions.classList.add('image-candidate-actions');
+
+        const clearSelectionButton = document.createElement('button');
+        clearSelectionButton.type = 'button';
+        clearSelectionButton.textContent = 'Clear Selection';
+        clearSelectionButton.addEventListener('click', () => {
+            record.selectedImageCandidateUrl = '';
+            clearImageCandidateDownloadState(record);
+            renderImageQueue();
+        });
+        selectedActions.appendChild(clearSelectionButton);
 
         const downloadButton = document.createElement('button');
         downloadButton.type = 'button';
         downloadButton.textContent = record.imageCandidateDownloadStatus === 'downloading'
             ? 'Downloading...'
-            : 'Validate / Download Selected';
+            : 'Validate Only';
         downloadButton.disabled = record.imageCandidateDownloadStatus === 'downloading';
         downloadButton.addEventListener('click', () => validateSelectedImageCandidate(record));
-        downloadActions.appendChild(downloadButton);
+        selectedActions.appendChild(downloadButton);
 
         if (record.selectedImageCandidateDownload?.previewUrl) {
             const finaliseButton = document.createElement('button');
             finaliseButton.type = 'button';
             finaliseButton.textContent = record.imageCandidateCloudStatus === 'uploading'
                 ? 'Uploading...'
-                : 'Upload to Cloud + Save imgURL';
+                : 'Save This Image';
             finaliseButton.disabled = record.imageCandidateCloudStatus === 'uploading';
             finaliseButton.addEventListener('click', () => finaliseSelectedImageCandidate(record));
-            downloadActions.appendChild(finaliseButton);
+            selectedActions.appendChild(finaliseButton);
         }
 
-        container.appendChild(downloadActions);
+        container.appendChild(selectedActions);
     }
 
     if (record.imageCandidates.length) {
@@ -3273,11 +3240,15 @@ function renderImageCandidateReview(record) {
 
         record.imageCandidates.forEach((url, index) => {
             const detail = getImageCandidateDetail(record, url) || {};
+            const isSelected = url === record.selectedImageCandidateUrl;
             const candidate = document.createElement('div');
             candidate.classList.add('image-candidate-card');
-            if (url === record.selectedImageCandidateUrl) {
+            if (isSelected) {
                 candidate.classList.add('selected');
             }
+
+            const imageWrap = document.createElement('div');
+            imageWrap.classList.add('image-candidate-image-wrap');
 
             const image = document.createElement('img');
             image.classList.add('image-candidate-preview-image');
@@ -3286,21 +3257,26 @@ function renderImageCandidateReview(record) {
             image.addEventListener('error', () => {
                 candidate.classList.add('image-candidate-broken');
             });
-            candidate.appendChild(image);
+            imageWrap.appendChild(image);
+
+            const dimensions = document.createElement('span');
+            dimensions.classList.add('image-candidate-dimensions');
+            dimensions.textContent = formatImageCandidateDimensions(detail);
+            imageWrap.appendChild(dimensions);
+            candidate.appendChild(imageWrap);
 
             const candidateActions = document.createElement('div');
             candidateActions.classList.add('image-candidate-card-actions');
 
             const selectButton = document.createElement('button');
             selectButton.type = 'button';
-            selectButton.textContent = url === record.selectedImageCandidateUrl ? 'Selected' : 'Select';
+            selectButton.textContent = isSelected ? 'Selected' : 'Select';
             selectButton.addEventListener('click', () => {
                 if (record.selectedImageCandidateUrl !== url) {
                     clearImageCandidateDownloadState(record);
                 }
                 record.selectedImageCandidateUrl = url;
-                record.imageCandidatesRejected = false;
-                renderImageQueue();
+                            renderImageQueue();
             });
             candidateActions.appendChild(selectButton);
 
@@ -3324,10 +3300,8 @@ function renderImageCandidateReview(record) {
 
             const urlText = document.createElement('div');
             urlText.classList.add('image-candidate-url-text');
-            const bits = [detail.source, detail.title, `${detail.originalWidth || '?'}×${detail.originalHeight || '?'}`]
-                .filter(Boolean);
-            urlText.textContent = bits.length ? `${bits.join(' · ')}
-${url}` : url;
+            const bits = [detail.source, detail.title].filter(Boolean);
+            urlText.textContent = bits.length ? bits.join(' · ') : url;
             candidate.appendChild(urlText);
 
             grid.appendChild(candidate);
@@ -3343,10 +3317,27 @@ function renderImageQueue() {
     const list = document.getElementById('image-queue-list');
     const count = document.getElementById('image-queue-count');
     const preview = document.getElementById('image-query-preview');
+    const saveSelectedButton = document.getElementById('image-queue-save-selected');
+    const fetchSerpApiButton = document.getElementById('image-queue-fetch-serpapi');
 
     if (!list || !count) return;
 
     count.textContent = `${imageQueueRecords.length} / ${IMAGE_QUEUE_LIMIT} queued`;
+
+    if (saveSelectedButton) {
+        const selectedCount = imageQueueRecords.filter(record => record.selectedImageCandidateUrl && record.imageCandidateCloudStatus !== 'saved').length;
+        saveSelectedButton.disabled = selectedCount === 0;
+        saveSelectedButton.textContent = selectedCount
+            ? `Save ${selectedCount} Selected Image${selectedCount === 1 ? '' : 's'} to Database`
+            : 'Save Selected Images to Database';
+    }
+
+    if (fetchSerpApiButton) {
+        const isFetching = imageQueueRecords.some(record => record.imageCandidateFetchStatus === 'fetching');
+        fetchSerpApiButton.disabled = imageQueueRecords.length === 0 || isFetching;
+        fetchSerpApiButton.textContent = isFetching ? 'Fetching SerpApi Candidates...' : 'Fetch SerpApi Image Candidates';
+    }
+
     list.innerHTML = '';
 
     if (preview) {
@@ -3507,76 +3498,20 @@ async function fillImageQueueWithRandomPeopleWithoutImages() {
         }
 
         records.forEach(addRecordToImageQueue);
-        renderImageQueryPreview();
+        renderImageQueue();
     } catch (error) {
         console.error('Error filling image queue randomly:', error);
         alert('Failed to fill the image queue with random people.');
     }
 }
 
-function renderImageQueryPreview() {
-    const preview = document.getElementById('image-query-preview');
-    if (!preview) return;
-
-    preview.innerHTML = '';
-
-    if (!imageQueueRecords.length) {
-        preview.style.display = 'block';
-        preview.textContent = 'Queue records before building image search queries.';
-        return;
-    }
-
-    const heading = document.createElement('h3');
-    heading.textContent = 'Image Search Query Preview';
-    preview.appendChild(heading);
-
-    const help = document.createElement('p');
-    help.textContent = 'These are the queries sent to SerpApi Google Images when you fetch candidates. Each fetch consumes one SerpApi search unless served from their cache.';
-    preview.appendChild(help);
-
-    const list = document.createElement('ol');
-    list.classList.add('image-query-list');
-
-    imageQueueRecords.forEach(record => {
-        const item = document.createElement('li');
-        const label = document.createElement('div');
-        label.textContent = `${record.label || '(Untitled record)'} — ${formatImageQueueMeta(record)}`;
-        item.appendChild(label);
-
-        const query = document.createElement('span');
-        query.classList.add('image-query-text');
-        query.textContent = buildImageSearchQuery(record);
-        item.appendChild(query);
-
-        if (record.selectedImageCandidateUrl || record.imageCandidatesRejected) {
-            const imageStatus = document.createElement('div');
-            imageStatus.classList.add('image-query-selected-candidate');
-            if (record.selectedImageCandidateCloud?.imgURL) {
-                imageStatus.textContent = `Saved ImageKit URL: ${record.selectedImageCandidateCloud.imgURL}`;
-            } else if (record.selectedImageCandidateUrl && record.selectedImageCandidateDownload?.previewUrl) {
-                imageStatus.textContent = `Selected candidate downloaded to local temp preview: ${record.selectedImageCandidateDownload.previewUrl}`;
-            } else {
-                imageStatus.textContent = record.selectedImageCandidateUrl
-                    ? `Selected candidate: ${record.selectedImageCandidateUrl}`
-                    : 'Candidates rejected for this queue session.';
-            }
-            item.appendChild(imageStatus);
-        }
-
-        list.appendChild(item);
-    });
-
-    preview.appendChild(list);
-    preview.style.display = 'block';
-}
-
 function initialiseImageQueueScaffold() {
     const searchButton = document.getElementById('image-queue-search-button');
     const searchInput = document.getElementById('image-queue-query');
-    const buildQueriesButton = document.getElementById('image-queue-build-queries');
     const clearButton = document.getElementById('image-queue-clear');
     const randomPeopleButton = document.getElementById('image-queue-random-people');
     const fetchSerpApiButton = document.getElementById('image-queue-fetch-serpapi');
+    const saveSelectedButton = document.getElementById('image-queue-save-selected');
 
     if (searchButton) {
         searchButton.addEventListener('click', searchRecordsForImageQueue);
@@ -3591,10 +3526,6 @@ function initialiseImageQueueScaffold() {
         });
     }
 
-    if (buildQueriesButton) {
-        buildQueriesButton.addEventListener('click', renderImageQueryPreview);
-    }
-
     if (clearButton) {
         clearButton.addEventListener('click', () => {
             imageQueueRecords.splice(0, imageQueueRecords.length);
@@ -3604,6 +3535,10 @@ function initialiseImageQueueScaffold() {
 
     if (fetchSerpApiButton) {
         fetchSerpApiButton.addEventListener('click', fetchSerpApiImageCandidatesForQueue);
+    }
+
+    if (saveSelectedButton) {
+        saveSelectedButton.addEventListener('click', saveSelectedImageCandidatesForQueue);
     }
 
     if (randomPeopleButton) {

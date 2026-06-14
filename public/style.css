@@ -1144,16 +1144,6 @@ nav ul li a:hover {
     opacity: 0.82;
 }
 
-.image-candidate-url-input {
-    width: 100%;
-    min-height: 5.5em;
-    margin: 6px 0;
-    padding: 7px;
-    border: 1px solid #00000022;
-    border-radius: 8px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    font-size: 12px;
-}
 
 .image-candidate-actions {
     margin: 4px 0 8px 0;
@@ -1304,4 +1294,35 @@ nav ul li a:hover {
     font-size: 12px;
     color: #333;
     text-decoration: underline;
+}
+
+/* Image queue UI cleanup */
+#image-queue-save-selected:disabled,
+#image-queue-fetch-serpapi:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.image-candidate-image-wrap {
+    position: relative;
+    width: 136px;
+    height: 136px;
+    margin: 0 auto;
+}
+
+.image-candidate-image-wrap .image-candidate-preview-image {
+    margin: 0;
+}
+
+.image-candidate-dimensions {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    padding: 3px 5px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.68);
+    color: #fff;
+    font-size: 10px;
+    line-height: 1;
+    pointer-events: none;
 }
