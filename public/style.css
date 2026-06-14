@@ -930,3 +930,32 @@ nav ul li a:hover {
     border-radius: 5px;
     background: #ffffffdd;
 }
+
+
+/* Local browser capture receiver */
+#load-latest-browser-capture {
+    margin-left: 10px;
+    padding: 7px 12px;
+    background-color: #333;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+#load-latest-browser-capture:hover {
+    background-color: #555;
+}
+
+.browser-capture-status {
+    display: inline-block;
+    margin-left: 10px;
+    font-size: 13px;
+    opacity: 0.78;
+}
+
+.browser-capture-status-error {
+    color: #7b3838;
+    font-weight: bold;
+    opacity: 1;
+}

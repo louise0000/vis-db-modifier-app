@@ -23,6 +23,7 @@ app.use(express.static('public'));
 
 const dbName = 'philosophyDiagrams';
 let db;
+let latestDraftCapture = null;
 
 const ROOT_RELATIONSHIP_FIELDS = ['parentId', 'children'];
 
@@ -87,6 +88,32 @@ function normaliseSourceMeta(sourceMeta = null) {
   return hasMeaningfulData ? nextSourceMeta : null;
 }
 
+function normaliseDraftCapturePayload(payload = {}) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('Draft capture payload must be a JSON object.');
+  }
+
+  const draftRecord = payload.draftRecord || payload.draft || payload;
+  if (!draftRecord || typeof draftRecord !== 'object' || Array.isArray(draftRecord)) {
+    throw new Error('Draft capture needs a draft-record object.');
+  }
+
+  const proposedInfo = draftRecord.proposedInfo || draftRecord.info || {};
+  const proposedType = draftRecord.proposedType || proposedInfo.type || draftRecord.type;
+  const raw = draftRecord.sourceMeta?.raw || draftRecord.raw || {};
+  const proposedLabel = proposedInfo.label || raw.title;
+
+  if (!proposedType) {
+    throw new Error('Draft capture needs proposedType, proposedInfo.type, or info.type.');
+  }
+
+  if (!proposedLabel) {
+    throw new Error('Draft capture needs proposedInfo.label, info.label, or sourceMeta.raw.title.');
+  }
+
+  return draftRecord;
+}
+
 client.connect().then(() => {
   db = client.db(dbName);
   console.log('Connected to MongoDB');
@@ -95,6 +122,37 @@ client.connect().then(() => {
 // Route to serve the index.html file
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+
+// Local draft capture bridge for future browser extension / translator workflows.
+// The browser-side tool can POST a draft object here while the modifier app is running,
+// then the Add Single Record UI can pull the latest capture into the existing review flow.
+app.post('/api/draft-capture', (req, res) => {
+  try {
+    const draftRecord = normaliseDraftCapturePayload(req.body);
+    latestDraftCapture = {
+      receivedAt: new Date().toISOString(),
+      draftRecord
+    };
+
+    res.json({
+      message: 'Draft capture received.',
+      latest: latestDraftCapture
+    });
+  } catch (err) {
+    console.error('Error receiving draft capture:', err);
+    res.status(400).json({ error: err.toString() });
+  }
+});
+
+app.get('/api/draft-capture/latest', (req, res) => {
+  if (!latestDraftCapture) {
+    res.status(404).json({ message: 'No draft capture has been received yet.' });
+    return;
+  }
+
+  res.json(latestDraftCapture);
 });
 
 

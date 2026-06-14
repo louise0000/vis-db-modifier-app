@@ -219,6 +219,36 @@ async function loadDraftFromJsonInput() {
     }
 }
 
+function setBrowserCaptureStatus(message, isError = false) {
+    const status = document.getElementById('browser-capture-status');
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle('browser-capture-status-error', Boolean(isError));
+}
+
+async function loadLatestBrowserCapture() {
+    try {
+        setBrowserCaptureStatus('Checking latest browser capture...');
+        const response = await fetch(`${window.location.protocol}//${window.location.host}/api/draft-capture/latest`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.message || data.error || 'No browser capture available.');
+        }
+
+        const draftRecord = normalisePastedDraftRecord(data.draftRecord || data.draft || data);
+        if (draftRecord.sourceMeta && !draftRecord.sourceMeta.capturedAt && data.receivedAt) {
+            draftRecord.sourceMeta.capturedAt = data.receivedAt;
+        }
+        await loadDraftRecordIntoAddForm(draftRecord);
+        setBrowserCaptureStatus(`Loaded browser capture received at ${data.receivedAt || 'unknown time'}.`);
+    } catch (error) {
+        console.error('Error loading latest browser capture:', error);
+        setBrowserCaptureStatus(error.message, true);
+        alert(`Could not load latest browser capture: ${error.message}`);
+    }
+}
+
 let currentDraftRecord = null;
 let currentDraftSourceFieldMapping = { mappedFields: {}, unmappedFields: {} };
 let currentDraftDuplicateCandidates = [];
@@ -1360,6 +1390,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     const loadPastedDraftButton = document.getElementById('load-pasted-draft');
     const fillExampleDraftJsonButton = document.getElementById('fill-example-draft-json');
     const clearDraftJsonButton = document.getElementById('clear-draft-json');
+    const loadLatestBrowserCaptureButton = document.getElementById('load-latest-browser-capture');
+
+    if (loadLatestBrowserCaptureButton) {
+        loadLatestBrowserCaptureButton.addEventListener('click', () => {
+            loadLatestBrowserCapture();
+        });
+    }
 
     if (toggleDraftJsonLoaderButton && draftJsonLoader) {
         toggleDraftJsonLoaderButton.addEventListener('click', () => {
