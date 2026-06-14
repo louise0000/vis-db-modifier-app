@@ -2935,6 +2935,36 @@ async function searchRecordsForImageQueue() {
     }
 }
 
+async function fillImageQueueWithRandomPeopleWithoutImages() {
+    if (imageQueueRecords.length >= IMAGE_QUEUE_LIMIT) {
+        alert(`The image queue is already full (${IMAGE_QUEUE_LIMIT} records).`);
+        return;
+    }
+
+    const remainingSlots = IMAGE_QUEUE_LIMIT - imageQueueRecords.length;
+    const excludedIds = imageQueueRecords.map(record => record.id).filter(Boolean).join(',');
+    const url = `${baseURL}/api/reference/image-queue/random-missing-images?limit=${remainingSlots}&types=artist,theorist&exclude=${encodeURIComponent(excludedIds)}`;
+
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Random image queue request failed with status ${response.status}`);
+        }
+
+        const records = await response.json();
+        if (!Array.isArray(records) || !records.length) {
+            alert('No matching artist/theorist records without images were found.');
+            return;
+        }
+
+        records.forEach(addRecordToImageQueue);
+        renderImageQueryPreview();
+    } catch (error) {
+        console.error('Error filling image queue randomly:', error);
+        alert('Failed to fill the image queue with random people.');
+    }
+}
+
 function renderImageQueryPreview() {
     const preview = document.getElementById('image-query-preview');
     if (!preview) return;
@@ -2981,6 +3011,7 @@ function initialiseImageQueueScaffold() {
     const searchInput = document.getElementById('image-queue-query');
     const buildQueriesButton = document.getElementById('image-queue-build-queries');
     const clearButton = document.getElementById('image-queue-clear');
+    const randomPeopleButton = document.getElementById('image-queue-random-people');
 
     if (searchButton) {
         searchButton.addEventListener('click', searchRecordsForImageQueue);
@@ -3004,6 +3035,10 @@ function initialiseImageQueueScaffold() {
             imageQueueRecords.splice(0, imageQueueRecords.length);
             renderImageQueue();
         });
+    }
+
+    if (randomPeopleButton) {
+        randomPeopleButton.addEventListener('click', fillImageQueueWithRandomPeopleWithoutImages);
     }
 
     renderImageQueue();

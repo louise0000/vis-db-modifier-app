@@ -996,7 +996,8 @@ nav ul li a:hover {
 }
 
 .image-queue-result-button:hover:not(:disabled) {
-    background: #ffffffdd;
+    background: #ffffffaa;
+    opacity: 0.78;
 }
 
 .image-queue-result-button:disabled {
@@ -1096,7 +1097,8 @@ nav ul li a:hover {
 .image-queue-actions button:hover,
 .image-queue-search-section button:hover,
 .image-queue-remove-button:hover {
-    background-color: #555;
+    background-color: #333;
+    opacity: 0.78;
 }
 
 .image-query-list {

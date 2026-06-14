@@ -1507,6 +1507,67 @@ app.post('/api/reference/missing-parent-replacement/apply', async (req, res) => 
 
 
 //search for full record of selected duplicates
+
+// Random records for the image queue: currently used to find artist/theorist
+// records that do not yet have a usable image URL. This route is deliberately
+// read-only and returns only lightweight record data for queueing.
+app.get('/api/reference/image-queue/random-missing-images', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const rawLimit = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 5)) : 5;
+    const types = String(req.query.types || 'artist,theorist')
+      .split(',')
+      .map(type => type.trim())
+      .filter(Boolean);
+    const excludedIds = String(req.query.exclude || '')
+      .split(',')
+      .map(id => id.trim())
+      .filter(Boolean);
+
+    const match = {
+      'info.type': { $in: types.length ? types : ['artist', 'theorist'] },
+      $and: [
+        {
+          $or: [
+            { 'info.imgURL': { $exists: false } },
+            { 'info.imgURL': null },
+            { 'info.imgURL': '' }
+          ]
+        },
+        {
+          $or: [
+            { 'info.image': { $exists: false } },
+            { 'info.image': null },
+            { 'info.image': '' }
+          ]
+        }
+      ]
+    };
+
+    if (excludedIds.length) {
+      match.id = { $nin: excludedIds };
+    }
+
+    const records = await collection.aggregate([
+      { $match: match },
+      { $sample: { size: limit } },
+      {
+        $project: {
+          _id: 0,
+          id: 1,
+          info: 1
+        }
+      }
+    ]).toArray();
+
+    res.json(records);
+  } catch (err) {
+    console.error('Error fetching random image queue records:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
 app.get('/api/reference/:id', async (req, res) => {
   try {
     const id = req.params.id;
