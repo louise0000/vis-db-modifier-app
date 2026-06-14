@@ -94,6 +94,18 @@
           <!-- Options will be populated dynamically -->
         </select>
         <button id="load-test-draft" type="button">Load Test Draft</button>
+        <button id="toggle-draft-json-loader" type="button">Paste Draft JSON</button>
+      </div>
+
+      <div id="draft-json-loader" class="draft-json-loader" style="display:none;">
+        <h3>Paste Draft JSON</h3>
+        <p>Paste a draft-record object from a future capture adapter, then load it into the existing add form for review.</p>
+        <textarea id="draft-json-input" placeholder='{"proposedType":"artworkBook","proposedInfo":{"label":"..."}}'></textarea>
+        <div class="draft-json-actions">
+          <button id="load-pasted-draft" type="button">Load Pasted Draft</button>
+          <button id="fill-example-draft-json" type="button">Fill Example JSON</button>
+          <button id="clear-draft-json" type="button">Clear</button>
+        </div>
       </div>
 
       <!-- Placeholder for the dynamic form -->

@@ -122,6 +122,65 @@ const testDraftRecord = {
     duplicateWarnings: []
 };
 
+function getExampleDraftJsonText() {
+    return JSON.stringify(testDraftRecord, null, 2);
+}
+
+function normalisePastedDraftRecord(parsedDraft) {
+    if (!parsedDraft || typeof parsedDraft !== 'object' || Array.isArray(parsedDraft)) {
+        throw new Error('Draft JSON must be an object.');
+    }
+
+    const proposedInfo = parsedDraft.proposedInfo || parsedDraft.info || {};
+    const proposedType = parsedDraft.proposedType || proposedInfo.type || parsedDraft.type;
+
+    if (!proposedType) {
+        throw new Error('Draft JSON needs proposedType, proposedInfo.type, or info.type.');
+    }
+
+    if (!proposedInfo.label && !parsedDraft.sourceMeta?.raw?.title && !parsedDraft.raw?.title) {
+        throw new Error('Draft JSON needs proposedInfo.label, info.label, or sourceMeta.raw.title.');
+    }
+
+    const sourceMeta = parsedDraft.sourceMeta || {
+        source: 'pasted-json',
+        capturedAt: new Date().toISOString(),
+        raw: parsedDraft.raw || {}
+    };
+
+    return {
+        proposedType,
+        proposedInfo: {
+            ...proposedInfo,
+            type: proposedType
+        },
+        proposedParentId: Array.isArray(parsedDraft.proposedParentId) ? parsedDraft.proposedParentId : [],
+        proposedChildren: Array.isArray(parsedDraft.proposedChildren) ? parsedDraft.proposedChildren : [],
+        sourceMeta,
+        duplicateWarnings: Array.isArray(parsedDraft.duplicateWarnings) ? parsedDraft.duplicateWarnings : []
+    };
+}
+
+async function loadDraftFromJsonInput() {
+    const input = document.getElementById('draft-json-input');
+    if (!input) return;
+
+    const rawText = input.value.trim();
+    if (!rawText) {
+        alert('Paste draft JSON first.');
+        return;
+    }
+
+    try {
+        const parsed = JSON.parse(rawText);
+        const draftRecord = normalisePastedDraftRecord(parsed);
+        await loadDraftRecordIntoAddForm(draftRecord);
+    } catch (error) {
+        console.error('Error loading pasted draft JSON:', error);
+        alert(`Could not load draft JSON: ${error.message}`);
+    }
+}
+
 let currentDraftRecord = null;
 let currentDraftSourceFieldMapping = { mappedFields: {}, unmappedFields: {} };
 let currentDraftDuplicateCandidates = [];
@@ -1204,6 +1263,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (loadTestDraftButton) {
         loadTestDraftButton.addEventListener('click', () => {
             loadDraftRecordIntoAddForm(testDraftRecord);
+        });
+    }
+
+    const draftJsonLoader = document.getElementById('draft-json-loader');
+    const draftJsonInput = document.getElementById('draft-json-input');
+    const toggleDraftJsonLoaderButton = document.getElementById('toggle-draft-json-loader');
+    const loadPastedDraftButton = document.getElementById('load-pasted-draft');
+    const fillExampleDraftJsonButton = document.getElementById('fill-example-draft-json');
+    const clearDraftJsonButton = document.getElementById('clear-draft-json');
+
+    if (toggleDraftJsonLoaderButton && draftJsonLoader) {
+        toggleDraftJsonLoaderButton.addEventListener('click', () => {
+            const isHidden = draftJsonLoader.style.display === 'none' || !draftJsonLoader.style.display;
+            draftJsonLoader.style.display = isHidden ? 'block' : 'none';
+        });
+    }
+
+    if (loadPastedDraftButton) {
+        loadPastedDraftButton.addEventListener('click', () => {
+            loadDraftFromJsonInput();
+        });
+    }
+
+    if (fillExampleDraftJsonButton && draftJsonInput) {
+        fillExampleDraftJsonButton.addEventListener('click', () => {
+            draftJsonInput.value = getExampleDraftJsonText();
+        });
+    }
+
+    if (clearDraftJsonButton && draftJsonInput) {
+        clearDraftJsonButton.addEventListener('click', () => {
+            draftJsonInput.value = '';
         });
     }
 
