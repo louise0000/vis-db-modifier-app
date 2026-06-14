@@ -2704,24 +2704,309 @@ if (integrityButton) {
 
 
 //handle visual scrolling
+function showContentSection(targetId, updateHistory = true) {
+    const contentWrapper = document.querySelector('.content-wrapper');
+    const targetSection = document.querySelector(targetId);
+    const allSections = Array.from(document.querySelectorAll('.content-section'));
+
+    if (!contentWrapper || !targetSection || allSections.length === 0) {
+        return;
+    }
+
+    const targetIndex = allSections.indexOf(targetSection);
+    if (targetIndex < 0) {
+        return;
+    }
+
+    const shiftPercent = (targetIndex * 100) / allSections.length;
+    contentWrapper.style.transform = `translateX(-${shiftPercent}%)`;
+
+    if (updateHistory) {
+        window.history.pushState({}, '', targetId); // Update the URL without jumping
+    }
+}
+
 document.querySelectorAll('nav a').forEach(anchor => {
     anchor.addEventListener('click', function (e) {
         e.preventDefault();
-
-        const targetId = this.getAttribute('href');
-        const contentWrapper = document.querySelector('.content-wrapper');
-        const sectionTransforms = {
-            '#section-1': 'translateX(0)',
-            '#section-2': 'translateX(-16.6667%)',
-            '#section-3': 'translateX(-33.3333%)',
-            '#section-4': 'translateX(-50%)',
-            '#section-5': 'translateX(-66.6667%)',
-            '#section-6': 'translateX(-83.3333%)'
-        };
-
-        if (sectionTransforms[targetId]) {
-            contentWrapper.style.transform = sectionTransforms[targetId];
-            window.history.pushState({}, '', targetId); // Update the URL without jumping
-        }
+        showContentSection(this.getAttribute('href'));
     });
 });
+
+if (window.location.hash && document.querySelector(window.location.hash)) {
+    showContentSection(window.location.hash, false);
+}
+
+// ========== Image queue scaffold ==========
+// This is the first non-destructive image workflow step: queue records and build
+// search queries. It does not scrape, download, upload, or write image data yet.
+const IMAGE_QUEUE_LIMIT = 5;
+const imageQueueRecords = [];
+
+function getImageQueueRecordId(record) {
+    return record?.id || record?.info?.id || '';
+}
+
+function getImageQueueInfo(record) {
+    return record?.info || record || {};
+}
+
+function normaliseImageQueueRecord(record) {
+    const info = getImageQueueInfo(record);
+    return {
+        id: getImageQueueRecordId(record),
+        label: info.label || record?.label || '',
+        label_jp: info.label_jp || '',
+        type: info.type || record?.type || '',
+        birth: info.birth || '',
+        death: info.death || '',
+        date: info.date || record?.date || '',
+        imgURL: info.imgURL || info.image || '',
+        raw: record
+    };
+}
+
+function formatImageQueueMeta(record) {
+    const parts = [];
+    if (record.type) parts.push(record.type);
+    if ((record.type === 'theorist' || record.type === 'artist') && (record.birth || record.death)) {
+        parts.push(`${record.birth || '?'}–${record.death || ''}`);
+    } else if (record.date) {
+        parts.push(record.date);
+    }
+    if (record.id) parts.push(`ID: ${record.id}`);
+    if (record.imgURL) parts.push('has image');
+    return parts.join(' · ');
+}
+
+function buildImageSearchQuery(record) {
+    const label = record.label || '';
+    const datePart = (record.type === 'theorist' || record.type === 'artist')
+        ? [record.birth, record.death].filter(Boolean).join(' ')
+        : record.date;
+
+    const hint = (record.type === 'theorist' || record.type === 'artist')
+        ? 'portrait'
+        : (record.type === 'artworkBook' ? 'book cover' : 'image');
+
+    return [label, datePart, hint].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function renderImageQueue() {
+    const list = document.getElementById('image-queue-list');
+    const count = document.getElementById('image-queue-count');
+    const preview = document.getElementById('image-query-preview');
+
+    if (!list || !count) return;
+
+    count.textContent = `${imageQueueRecords.length} / ${IMAGE_QUEUE_LIMIT} queued`;
+    list.innerHTML = '';
+
+    if (preview) {
+        preview.style.display = 'none';
+        preview.innerHTML = '';
+    }
+
+    if (!imageQueueRecords.length) {
+        list.textContent = 'No records queued yet.';
+        return;
+    }
+
+    imageQueueRecords.forEach(record => {
+        const card = document.createElement('div');
+        card.classList.add('image-queue-card');
+
+        if (record.imgURL) {
+            const thumb = document.createElement('img');
+            thumb.classList.add('image-queue-thumb');
+            thumb.src = record.imgURL;
+            thumb.alt = record.label || 'Queued record image';
+            card.appendChild(thumb);
+        } else {
+            const placeholder = document.createElement('div');
+            placeholder.classList.add('image-queue-thumb-placeholder');
+            placeholder.textContent = 'No image';
+            card.appendChild(placeholder);
+        }
+
+        const details = document.createElement('div');
+        const title = document.createElement('div');
+        title.classList.add('image-queue-card-title');
+        title.textContent = record.label || '(Untitled record)';
+        details.appendChild(title);
+
+        if (record.label_jp) {
+            const jp = document.createElement('div');
+            jp.classList.add('image-queue-card-meta');
+            jp.textContent = record.label_jp;
+            details.appendChild(jp);
+        }
+
+        const meta = document.createElement('div');
+        meta.classList.add('image-queue-card-meta');
+        meta.textContent = formatImageQueueMeta(record);
+        details.appendChild(meta);
+
+        const query = document.createElement('div');
+        query.classList.add('image-queue-card-meta');
+        query.textContent = `Future query: ${buildImageSearchQuery(record)}`;
+        details.appendChild(query);
+
+        card.appendChild(details);
+
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.classList.add('image-queue-remove-button');
+        removeButton.textContent = 'Remove';
+        removeButton.addEventListener('click', () => {
+            const index = imageQueueRecords.findIndex(item => item.id === record.id);
+            if (index !== -1) imageQueueRecords.splice(index, 1);
+            renderImageQueue();
+        });
+        card.appendChild(removeButton);
+
+        list.appendChild(card);
+    });
+}
+
+function addRecordToImageQueue(record) {
+    const normalisedRecord = normaliseImageQueueRecord(record);
+    if (!normalisedRecord.id) {
+        alert('This record does not have an id, so it cannot be queued safely.');
+        return;
+    }
+
+    if (imageQueueRecords.some(item => item.id === normalisedRecord.id)) {
+        alert('This record is already in the image queue.');
+        return;
+    }
+
+    if (imageQueueRecords.length >= IMAGE_QUEUE_LIMIT) {
+        alert(`The image queue is limited to ${IMAGE_QUEUE_LIMIT} records.`);
+        return;
+    }
+
+    imageQueueRecords.push(normalisedRecord);
+    renderImageQueue();
+}
+
+function renderImageQueueSearchResults(data) {
+    const container = document.getElementById('image-queue-search-results');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (!Array.isArray(data) || !data.length) {
+        container.textContent = 'No matches found.';
+        return;
+    }
+
+    data.forEach(item => {
+        const record = normaliseImageQueueRecord(item);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.classList.add('image-queue-result-button');
+        button.innerHTML = `<strong>${record.label || '(Untitled record)'}</strong> ${formatImageQueueMeta(record)}`;
+        button.disabled = imageQueueRecords.some(queueItem => queueItem.id === record.id);
+        button.addEventListener('click', () => {
+            addRecordToImageQueue(item);
+            button.disabled = true;
+        });
+        container.appendChild(button);
+    });
+}
+
+async function searchRecordsForImageQueue() {
+    const input = document.getElementById('image-queue-query');
+    const query = input?.value.trim();
+
+    if (!query) {
+        alert('Please enter a search term.');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(query)}`);
+        const data = await response.json();
+        renderImageQueueSearchResults(data);
+    } catch (error) {
+        console.error('Error searching image queue records:', error);
+        alert('Failed to search records for the image queue.');
+    }
+}
+
+function renderImageQueryPreview() {
+    const preview = document.getElementById('image-query-preview');
+    if (!preview) return;
+
+    preview.innerHTML = '';
+
+    if (!imageQueueRecords.length) {
+        preview.style.display = 'block';
+        preview.textContent = 'Queue records before building image search queries.';
+        return;
+    }
+
+    const heading = document.createElement('h3');
+    heading.textContent = 'Image Search Query Preview';
+    preview.appendChild(heading);
+
+    const help = document.createElement('p');
+    help.textContent = 'These are the queries a future image-candidate fetcher would send to a search API or scraper. No external request is made in this scaffold.';
+    preview.appendChild(help);
+
+    const list = document.createElement('ol');
+    list.classList.add('image-query-list');
+
+    imageQueueRecords.forEach(record => {
+        const item = document.createElement('li');
+        const label = document.createElement('div');
+        label.textContent = `${record.label || '(Untitled record)'} — ${formatImageQueueMeta(record)}`;
+        item.appendChild(label);
+
+        const query = document.createElement('span');
+        query.classList.add('image-query-text');
+        query.textContent = buildImageSearchQuery(record);
+        item.appendChild(query);
+
+        list.appendChild(item);
+    });
+
+    preview.appendChild(list);
+    preview.style.display = 'block';
+}
+
+function initialiseImageQueueScaffold() {
+    const searchButton = document.getElementById('image-queue-search-button');
+    const searchInput = document.getElementById('image-queue-query');
+    const buildQueriesButton = document.getElementById('image-queue-build-queries');
+    const clearButton = document.getElementById('image-queue-clear');
+
+    if (searchButton) {
+        searchButton.addEventListener('click', searchRecordsForImageQueue);
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                searchRecordsForImageQueue();
+            }
+        });
+    }
+
+    if (buildQueriesButton) {
+        buildQueriesButton.addEventListener('click', renderImageQueryPreview);
+    }
+
+    if (clearButton) {
+        clearButton.addEventListener('click', () => {
+            imageQueueRecords.splice(0, imageQueueRecords.length);
+            renderImageQueue();
+        });
+    }
+
+    renderImageQueue();
+}
+
+initialiseImageQueueScaffold();
