@@ -44,63 +44,80 @@ function executeScript(api, details) {
   });
 }
 
-function firstUsefulParagraph() {
-  const selectors = [
-    '#mw-content-text .mw-parser-output > p',
-    'article p',
-    'main p',
-    'p'
-  ];
-
-  for (const selector of selectors) {
-    const paragraph = Array.from(document.querySelectorAll(selector))
-      .map(p => (p.innerText || '').replace(/\s+/g, ' ').trim())
-      .find(text => text.length > 80);
-
-    if (paragraph) return paragraph;
-  }
-
-  return '';
-}
-
-function imageFromPage() {
-  const infoboxImage = document.querySelector('.infobox img');
-  if (infoboxImage?.src) return infoboxImage.src;
-
-  const ogImage = document.querySelector('meta[property="og:image"]');
-  if (ogImage?.content) return ogImage.content;
-
-  const firstArticleImage = document.querySelector('article img, main img, img');
-  if (firstArticleImage?.src) return firstArticleImage.src;
-
-  return '';
-}
-
-function cleanPageTitle(rawTitle, isWikipedia) {
-  const title = (rawTitle || '').replace(/\s+/g, ' ').trim();
-  if (!isWikipedia) return title;
-  return title.replace(/\s*-\s*Wikipedia\s*$/i, '').trim();
-}
-
-function parseYearsFromText(text) {
-  const rangeMatch = text.match(/(?:\(|\b)(\d{3,4})\s*[–—-]\s*(\d{3,4})(?:\)|\b)/);
-  if (rangeMatch) {
-    return { birth: rangeMatch[1], death: rangeMatch[2] };
-  }
-
-  const bday = document.querySelector('.bday')?.textContent?.trim() || '';
-  const bdayYear = bday.match(/(\d{3,4})/)?.[1] || '';
-  return { birth: bdayYear, death: '' };
-}
-
 function extractDraftFromCurrentPage(requestedType) {
+  function firstUsefulParagraphFromDocument() {
+    const selectors = [
+      '#mw-content-text .mw-parser-output > p',
+      'article p',
+      'main p',
+      'p'
+    ];
+
+    for (const selector of selectors) {
+      const paragraph = Array.from(document.querySelectorAll(selector))
+        .map(p => (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim())
+        .find(text => text.length > 80);
+
+      if (paragraph) return paragraph;
+    }
+
+    return '';
+  }
+
+  function imageFromDocument() {
+    const infoboxImage = document.querySelector('.infobox img');
+    if (infoboxImage?.src) return infoboxImage.src;
+
+    const ogImage = document.querySelector('meta[property="og:image"]');
+    if (ogImage?.content) return ogImage.content;
+
+    const firstArticleImage = document.querySelector('article img, main img, img');
+    if (firstArticleImage?.src) return firstArticleImage.src;
+
+    return '';
+  }
+
+  function cleanPageTitleFromDocument(rawTitle, isWikipedia) {
+    const title = (rawTitle || '').replace(/\s+/g, ' ').trim();
+    if (!isWikipedia) return title;
+    return title.replace(/\s*-\s*Wikipedia\s*$/i, '').trim();
+  }
+
+  function parseYearsFromDocument(text) {
+    const bday = document.querySelector('.bday')?.textContent?.trim() || '';
+    const bdayYear = bday.match(/(\d{3,4})/)?.[1] || '';
+
+    const deathDate = Array.from(document.querySelectorAll('.dday, .deathdate'))
+      .map(el => el.textContent || '')
+      .join(' ');
+    const deathYear = deathDate.match(/(\d{3,4})/)?.[1] || '';
+
+    if (bdayYear || deathYear) {
+      return { birth: bdayYear, death: deathYear };
+    }
+
+    const rangeMatch = (text || '').match(/(?:\(|\b)(\d{3,4})\s*[–—-]\s*(\d{3,4})(?:\)|\b)/);
+    if (rangeMatch) {
+      return { birth: rangeMatch[1], death: rangeMatch[2] };
+    }
+
+    return { birth: '', death: '' };
+  }
+
+  function extractWikidataIdFromDocument() {
+    const wikidataLink = document.querySelector('li#t-wikibase a, a[href*="wikidata.org/wiki/Q"]');
+    const href = wikidataLink?.href || '';
+    return href.match(/\/wiki\/(Q\d+)/)?.[1] || '';
+  }
+
   const hostname = window.location.hostname;
   const isWikipedia = /(^|\.)wikipedia\.org$/i.test(hostname);
-  const title = cleanPageTitle(document.title, isWikipedia);
+  const title = cleanPageTitleFromDocument(document.title, isWikipedia);
   const canonicalUrl = document.querySelector('link[rel="canonical"]')?.href || window.location.href;
-  const firstParagraph = firstUsefulParagraph();
-  const imgURL = imageFromPage();
-  const years = parseYearsFromText(firstParagraph);
+  const firstParagraph = firstUsefulParagraphFromDocument();
+  const imgURL = imageFromDocument();
+  const years = parseYearsFromDocument(firstParagraph);
+  const wikidataQID = extractWikidataIdFromDocument();
   const inferredType = isWikipedia ? 'theorist' : 'artworkBook';
   const proposedType = requestedType === 'auto' ? inferredType : requestedType;
   const capturedAt = new Date().toISOString();
@@ -141,7 +158,8 @@ function extractDraftFromCurrentPage(requestedType) {
         firstParagraph,
         imgURL,
         birth: years.birth,
-        death: years.death
+        death: years.death,
+        wikidataQID
       }
     },
     duplicateWarnings: []
