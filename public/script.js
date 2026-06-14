@@ -2764,6 +2764,9 @@ function normaliseImageQueueRecord(record) {
         imgURL: info.imgURL || info.image || '',
         imageCandidates: Array.isArray(record?.imageCandidates) ? record.imageCandidates : [],
         selectedImageCandidateUrl: record?.selectedImageCandidateUrl || '',
+        selectedImageCandidateDownload: record?.selectedImageCandidateDownload || null,
+        imageCandidateDownloadStatus: record?.imageCandidateDownloadStatus || '',
+        imageCandidateDownloadError: record?.imageCandidateDownloadError || '',
         imageCandidatesRejected: Boolean(record?.imageCandidatesRejected),
         manualCandidateText: record?.manualCandidateText || '',
         raw: record
@@ -2812,6 +2815,97 @@ function parseManualImageCandidateUrls(rawText) {
         .slice(0, 5);
 }
 
+function clearImageCandidateDownloadState(record) {
+    if (!record) return;
+    record.selectedImageCandidateDownload = null;
+    record.imageCandidateDownloadStatus = '';
+    record.imageCandidateDownloadError = '';
+}
+
+function renderLocalImageCandidatePreview(downloadInfo) {
+    if (!downloadInfo || !downloadInfo.previewUrl) return null;
+
+    const container = document.createElement('div');
+    container.classList.add('image-candidate-local-preview');
+
+    const image = document.createElement('img');
+    image.src = downloadInfo.previewUrl;
+    image.alt = 'Local temp image preview';
+    container.appendChild(image);
+
+    const details = document.createElement('div');
+
+    const heading = document.createElement('p');
+    heading.innerHTML = '<strong>Local temp preview</strong>';
+    details.appendChild(heading);
+
+    const meta = document.createElement('p');
+    const size = Number(downloadInfo.sizeBytes || 0);
+    const sizeText = size ? `${Math.round(size / 1024)} KB` : 'size unknown';
+    meta.textContent = [downloadInfo.contentType, sizeText].filter(Boolean).join(' · ');
+    details.appendChild(meta);
+
+    const note = document.createElement('p');
+    note.textContent = downloadInfo.note || 'Downloaded for local preview only. No database write yet.';
+    details.appendChild(note);
+
+    const openLink = document.createElement('a');
+    openLink.href = downloadInfo.previewUrl;
+    openLink.target = '_blank';
+    openLink.rel = 'noopener noreferrer';
+    openLink.textContent = 'Open local preview';
+    details.appendChild(openLink);
+
+    container.appendChild(details);
+    return container;
+}
+
+async function validateSelectedImageCandidate(record) {
+    if (!record || !record.selectedImageCandidateUrl) {
+        alert('Select an image candidate before validating/downloading.');
+        return;
+    }
+
+    record.imageCandidateDownloadStatus = 'downloading';
+    record.imageCandidateDownloadError = '';
+    record.selectedImageCandidateDownload = null;
+    renderImageQueue();
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/image-queue/validate-image-candidate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                imageUrl: record.selectedImageCandidateUrl,
+                recordId: record.id,
+                label: record.label
+            })
+        });
+
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (jsonError) {
+            payload = null;
+        }
+
+        if (!response.ok) {
+            throw new Error(payload?.error || `Image candidate validation failed with status ${response.status}.`);
+        }
+
+        record.selectedImageCandidateDownload = payload;
+        record.imageCandidateDownloadStatus = 'downloaded';
+        record.imageCandidateDownloadError = '';
+    } catch (error) {
+        console.error('Error validating/downloading selected image candidate:', error);
+        record.selectedImageCandidateDownload = null;
+        record.imageCandidateDownloadStatus = 'error';
+        record.imageCandidateDownloadError = error.message || String(error);
+    }
+
+    renderImageQueue();
+}
+
 function renderImageCandidateReview(record) {
     const container = document.createElement('div');
     container.classList.add('image-candidate-review');
@@ -2823,7 +2917,7 @@ function renderImageCandidateReview(record) {
 
     const help = document.createElement('p');
     help.classList.add('image-candidate-help-text');
-    help.textContent = 'Paste up to five image URLs, one per line. This only previews/selects candidates; it does not download, upload, or write to the database.';
+    help.textContent = 'Paste up to five image URLs, one per line. You can preview/select, then validate-download the selected image to a local temp file only.';
     container.appendChild(help);
 
     const textarea = document.createElement('textarea');
@@ -2850,9 +2944,13 @@ function renderImageCandidateReview(record) {
 
         record.manualCandidateText = textarea.value;
         record.imageCandidates = urls;
+        const previousSelection = record.selectedImageCandidateUrl;
         record.selectedImageCandidateUrl = urls.includes(record.selectedImageCandidateUrl)
             ? record.selectedImageCandidateUrl
             : '';
+        if (previousSelection !== record.selectedImageCandidateUrl) {
+            clearImageCandidateDownloadState(record);
+        }
         record.imageCandidatesRejected = false;
         renderImageQueue();
     });
@@ -2863,6 +2961,7 @@ function renderImageCandidateReview(record) {
     rejectButton.textContent = 'Reject All';
     rejectButton.addEventListener('click', () => {
         record.selectedImageCandidateUrl = '';
+        clearImageCandidateDownloadState(record);
         record.imageCandidatesRejected = true;
         renderImageQueue();
     });
@@ -2872,7 +2971,14 @@ function renderImageCandidateReview(record) {
 
     const status = document.createElement('div');
     status.classList.add('image-candidate-status');
-    if (record.selectedImageCandidateUrl) {
+    if (record.imageCandidateDownloadStatus === 'downloading') {
+        status.textContent = 'Validating and downloading selected image to a local temp preview...';
+    } else if (record.imageCandidateDownloadStatus === 'downloaded') {
+        status.textContent = 'Selected image was downloaded to local temp preview. No database write yet.';
+    } else if (record.imageCandidateDownloadStatus === 'error') {
+        status.classList.add('image-candidate-download-error');
+        status.textContent = `Download failed: ${record.imageCandidateDownloadError || 'Unknown error.'}`;
+    } else if (record.selectedImageCandidateUrl) {
         status.textContent = 'Selected candidate only. No database write yet.';
     } else if (record.imageCandidatesRejected) {
         status.textContent = 'All candidates rejected for this queue session.';
@@ -2882,6 +2988,25 @@ function renderImageCandidateReview(record) {
         status.textContent = 'No candidates previewed yet.';
     }
     container.appendChild(status);
+
+    const localPreview = renderLocalImageCandidatePreview(record.selectedImageCandidateDownload);
+    if (localPreview) container.appendChild(localPreview);
+
+    if (record.selectedImageCandidateUrl) {
+        const downloadActions = document.createElement('div');
+        downloadActions.classList.add('image-candidate-actions');
+
+        const downloadButton = document.createElement('button');
+        downloadButton.type = 'button';
+        downloadButton.textContent = record.imageCandidateDownloadStatus === 'downloading'
+            ? 'Downloading...'
+            : 'Validate / Download Selected';
+        downloadButton.disabled = record.imageCandidateDownloadStatus === 'downloading';
+        downloadButton.addEventListener('click', () => validateSelectedImageCandidate(record));
+        downloadActions.appendChild(downloadButton);
+
+        container.appendChild(downloadActions);
+    }
 
     if (record.imageCandidates.length) {
         const grid = document.createElement('div');
@@ -2910,6 +3035,9 @@ function renderImageCandidateReview(record) {
             selectButton.type = 'button';
             selectButton.textContent = url === record.selectedImageCandidateUrl ? 'Selected' : 'Select';
             selectButton.addEventListener('click', () => {
+                if (record.selectedImageCandidateUrl !== url) {
+                    clearImageCandidateDownloadState(record);
+                }
                 record.selectedImageCandidateUrl = url;
                 record.imageCandidatesRejected = false;
                 renderImageQueue();
@@ -3151,9 +3279,13 @@ function renderImageQueryPreview() {
         if (record.selectedImageCandidateUrl || record.imageCandidatesRejected) {
             const imageStatus = document.createElement('div');
             imageStatus.classList.add('image-query-selected-candidate');
-            imageStatus.textContent = record.selectedImageCandidateUrl
-                ? `Selected candidate: ${record.selectedImageCandidateUrl}`
-                : 'Candidates rejected for this queue session.';
+            if (record.selectedImageCandidateUrl && record.selectedImageCandidateDownload?.previewUrl) {
+                imageStatus.textContent = `Selected candidate downloaded to local temp preview: ${record.selectedImageCandidateDownload.previewUrl}`;
+            } else {
+                imageStatus.textContent = record.selectedImageCandidateUrl
+                    ? `Selected candidate: ${record.selectedImageCandidateUrl}`
+                    : 'Candidates rejected for this queue session.';
+            }
             item.appendChild(imageStatus);
         }
 

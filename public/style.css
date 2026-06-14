@@ -1178,13 +1178,15 @@ nav ul li a:hover {
 }
 
 .image-candidate-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
     gap: 10px;
     margin-top: 10px;
 }
 
 .image-candidate-card {
+    width: 154px;
     padding: 8px;
     background: #ffffffaa;
     border: 1px solid #00000022;
@@ -1197,10 +1199,12 @@ nav ul li a:hover {
 }
 
 .image-candidate-preview-image {
-    width: 100%;
-    height: 120px;
-    object-fit: cover;
-    background: #00000011;
+    width: 136px;
+    height: 136px;
+    display: block;
+    margin: 0 auto;
+    object-fit: contain;
+    background: #ffffff99;
     border: 1px solid #00000022;
     border-radius: 6px;
 }
@@ -1227,4 +1231,44 @@ nav ul li a:hover {
     font-size: 10px;
     opacity: 0.72;
     overflow-wrap: anywhere;
+}
+
+
+/* Local temp image validation preview */
+.image-candidate-download-error {
+    color: #7b3838;
+    font-weight: bold;
+    opacity: 1;
+}
+
+.image-candidate-local-preview {
+    display: grid;
+    grid-template-columns: 96px 1fr;
+    gap: 10px;
+    align-items: start;
+    margin-top: 10px;
+    padding: 8px;
+    background: #ffffff99;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+}
+
+.image-candidate-local-preview img {
+    width: 88px;
+    height: 88px;
+    object-fit: contain;
+    background: #ffffff99;
+    border: 1px solid #00000022;
+    border-radius: 6px;
+}
+
+.image-candidate-local-preview p {
+    margin: 0 0 4px 0;
+    font-size: 12px;
+}
+
+.image-candidate-local-preview a {
+    font-size: 12px;
+    color: #333;
+    text-decoration: underline;
 }

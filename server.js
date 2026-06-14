@@ -3,6 +3,8 @@ const express = require('express');
 const { MongoClient } = require('mongodb');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
+const { promises: fsp } = fs;
 const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
@@ -24,6 +26,9 @@ app.use(express.static('public'));
 const dbName = 'philosophyDiagrams';
 let db;
 let latestDraftCapture = null;
+
+const IMAGE_CANDIDATE_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_CANDIDATE_PREVIEW_DIR = path.join(__dirname, 'public', '_image-candidate-preview');
 
 const ROOT_RELATIONSHIP_FIELDS = ['parentId', 'children'];
 
@@ -53,6 +58,36 @@ function normaliseInfo(info = {}) {
   }
 
   return nextInfo;
+}
+
+function slugifyImageCandidateLabel(label = '') {
+  const slug = String(label || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+
+  return slug || 'image-candidate';
+}
+
+function getImageExtensionFromContentType(contentType = '') {
+  const lower = String(contentType || '').toLowerCase();
+  if (lower.includes('png')) return 'png';
+  if (lower.includes('webp')) return 'webp';
+  if (lower.includes('gif')) return 'gif';
+  if (lower.includes('svg')) return 'svg';
+  if (lower.includes('jpeg') || lower.includes('jpg')) return 'jpg';
+  return 'img';
+}
+
+function isBlockedImageCandidateHost(hostname = '') {
+  const lower = String(hostname || '').toLowerCase();
+  return lower === 'localhost'
+    || lower === '0.0.0.0'
+    || lower === '::1'
+    || lower.startsWith('127.');
 }
 
 
@@ -1565,6 +1600,106 @@ app.get('/api/reference/image-queue/random-missing-images', async (req, res) => 
   } catch (err) {
     console.error('Error fetching random image queue records:', err);
     res.status(500).json({ error: err.toString() });
+  }
+});
+
+
+// Validate and download one selected image candidate into a local temp preview folder.
+// This is intentionally non-destructive: it does not upload to cloud storage and does
+// not write imgURL/sourceMeta back to MongoDB.
+app.post('/api/reference/image-queue/validate-image-candidate', async (req, res) => {
+  try {
+    const imageUrl = String(req.body?.imageUrl || '').trim();
+    const recordId = String(req.body?.recordId || '').trim();
+    const label = String(req.body?.label || '').trim();
+
+    if (!imageUrl) {
+      return res.status(400).json({ error: 'imageUrl is required.' });
+    }
+
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(imageUrl);
+    } catch (err) {
+      return res.status(400).json({ error: 'imageUrl must be a valid URL.' });
+    }
+
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      return res.status(400).json({ error: 'Only http/https image URLs can be downloaded.' });
+    }
+
+    if (isBlockedImageCandidateHost(parsedUrl.hostname)) {
+      return res.status(400).json({ error: 'Localhost/private preview URLs are not accepted for this download step.' });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    let response;
+    try {
+      response = await fetch(parsedUrl.toString(), {
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; ModifierImageQueue/0.1; local research tool)'
+        }
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response.ok) {
+      return res.status(502).json({ error: `Image request failed with status ${response.status}.` });
+    }
+
+    const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim();
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      return res.status(415).json({ error: `URL did not return an image content type (${contentType || 'unknown'}).` });
+    }
+
+    const announcedLength = Number.parseInt(response.headers.get('content-length') || '0', 10);
+    if (Number.isFinite(announcedLength) && announcedLength > IMAGE_CANDIDATE_MAX_BYTES) {
+      return res.status(413).json({ error: 'Image is larger than the 8 MB local preview limit.' });
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    if (buffer.length > IMAGE_CANDIDATE_MAX_BYTES) {
+      return res.status(413).json({ error: 'Image is larger than the 8 MB local preview limit.' });
+    }
+
+    if (buffer.length < 128) {
+      return res.status(422).json({ error: 'Downloaded file is too small to be a plausible image.' });
+    }
+
+    await fsp.mkdir(IMAGE_CANDIDATE_PREVIEW_DIR, { recursive: true });
+
+    const ext = getImageExtensionFromContentType(contentType);
+    const recordPart = recordId ? recordId.slice(0, 8) : uuidv4().slice(0, 8);
+    const filename = `${slugifyImageCandidateLabel(label)}-${recordPart}-${Date.now()}-${uuidv4().slice(0, 8)}.${ext}`;
+    const filePath = path.join(IMAGE_CANDIDATE_PREVIEW_DIR, filename);
+
+    await fsp.writeFile(filePath, buffer);
+
+    res.json({
+      success: true,
+      originalUrl: imageUrl,
+      finalUrl: response.url || imageUrl,
+      previewUrl: `/_image-candidate-preview/${filename}`,
+      filename,
+      contentType,
+      sizeBytes: buffer.length,
+      storage: 'local-temp-preview',
+      savedAt: new Date().toISOString(),
+      note: 'Downloaded for local preview only. No cloud upload and no database write.'
+    });
+  } catch (err) {
+    console.error('Error validating/downloading image candidate:', err);
+    const message = err.name === 'AbortError'
+      ? 'Image request timed out.'
+      : err.toString();
+    res.status(500).json({ error: message });
   }
 });
 
