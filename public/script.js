@@ -122,8 +122,46 @@ const testDraftRecord = {
     duplicateWarnings: []
 };
 
-function getExampleDraftJsonText() {
-    return JSON.stringify(testDraftRecord, null, 2);
+const draftExampleRecords = {
+    book: testDraftRecord,
+    'wikipedia-person': {
+        proposedType: 'theorist',
+        proposedInfo: {
+            label: 'Test Wikipedia Person',
+            type: 'theorist',
+            birth: '1901',
+            death: '1999',
+            note: 'Imported person draft note from a Wikipedia/Wikidata-style source.',
+            note_jp: ''
+        },
+        sourceMeta: {
+            source: 'wikipedia-person-test',
+            capturedAt: new Date().toISOString(),
+            raw: {
+                title: 'Test Wikipedia Person',
+                wikidataQID: 'Q000000',
+                wikipediaUrl: 'https://en.wikipedia.org/wiki/Test_Wikipedia_Person',
+                description: 'Example biography page used to test person capture.',
+                birth: '1901',
+                death: '1999',
+                imgURL: 'https://example.com/test-person.jpg'
+            }
+        },
+        duplicateWarnings: []
+    }
+};
+
+function getDraftExampleRecord(exampleKey = 'book') {
+    return draftExampleRecords[exampleKey] || draftExampleRecords.book;
+}
+
+function getSelectedDraftExampleKey() {
+    const selector = document.getElementById('draft-example-select');
+    return selector?.value || 'book';
+}
+
+function getExampleDraftJsonText(exampleKey = 'book') {
+    return JSON.stringify(getDraftExampleRecord(exampleKey), null, 2);
 }
 
 function normalisePastedDraftRecord(parsedDraft) {
@@ -1338,7 +1376,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (fillExampleDraftJsonButton && draftJsonInput) {
         fillExampleDraftJsonButton.addEventListener('click', () => {
-            draftJsonInput.value = getExampleDraftJsonText();
+            draftJsonInput.value = getExampleDraftJsonText(getSelectedDraftExampleKey());
         });
     }
 

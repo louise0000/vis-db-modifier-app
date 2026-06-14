@@ -916,3 +916,17 @@ nav ul li a:hover {
     padding: 8px;
     border-radius: 6px;
 }
+
+.draft-example-select-label {
+    display: inline-flex;
+    align-items: center;
+    font-size: 13px;
+    font-weight: bold;
+}
+
+#draft-example-select {
+    padding: 7px 10px;
+    border: 1px solid #00000022;
+    border-radius: 5px;
+    background: #ffffffdd;
+}

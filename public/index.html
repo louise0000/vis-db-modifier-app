@@ -103,7 +103,12 @@
         <textarea id="draft-json-input" placeholder='{"proposedType":"artworkBook","proposedInfo":{"label":"..."}}'></textarea>
         <div class="draft-json-actions">
           <button id="load-pasted-draft" type="button">Load Pasted Draft</button>
-          <button id="fill-example-draft-json" type="button">Fill Example JSON</button>
+          <label class="draft-example-select-label" for="draft-example-select">Example:</label>
+          <select id="draft-example-select">
+            <option value="book">Book / Zotero-style</option>
+            <option value="wikipedia-person">Person / Wikipedia-style</option>
+          </select>
+          <button id="fill-example-draft-json" type="button">Fill Selected Example JSON</button>
           <button id="clear-draft-json" type="button">Clear</button>
         </div>
       </div>
