@@ -1,0 +1,14 @@
+{
+  "name": "modifier-draft-capture-extension",
+  "version": "0.1.2",
+  "private": true,
+  "description": "Local WebExtension prototype for sending draft records to the modifier app.",
+  "scripts": {
+    "firefox": "web-ext run --source-dir .",
+    "lint": "web-ext lint --source-dir .",
+    "build": "web-ext build --source-dir . --overwrite-dest"
+  },
+  "devDependencies": {
+    "web-ext": "^8.9.0"
+  }
+}

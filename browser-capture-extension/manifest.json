@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Modifier Draft Capture",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Capture the current web page as a draft record for the local database modifier app.",
   "permissions": [
     "activeTab",
@@ -9,11 +9,28 @@
   ],
   "host_permissions": [
     "http://localhost:3000/*",
-    "http://localhost:3002/*",
     "<all_urls>"
   ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "modifier-draft-capture@louiserouse.local",
+      "strict_min_version": "109.0"
+    }
+  },
   "action": {
     "default_title": "Capture draft record",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
   }
 }
