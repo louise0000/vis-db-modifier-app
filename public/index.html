@@ -93,11 +93,13 @@
           <option value="">--Select a Type--</option>
           <!-- Options will be populated dynamically -->
         </select>
+        <button id="load-test-draft" type="button">Load Test Draft</button>
       </div>
 
       <!-- Placeholder for the dynamic form -->
       <div id="record-form" style="display:none;">
         <h3>Create New Record</h3>
+        <div id="draft-source-metadata" class="draft-source-metadata" style="display:none;"></div>
         <form id="new-record-form">
           <!-- Form fields will be generated dynamically -->
           <div id="form-fields"></div>
