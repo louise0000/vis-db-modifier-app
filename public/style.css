@@ -720,3 +720,76 @@ nav ul li a:hover {
     border-radius: 6px;
     max-width: 100%;
 }
+
+/* Draft record prefill bridge */
+#load-test-draft {
+    margin-left: 10px;
+    padding: 7px 12px;
+    background-color: #333;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+#load-test-draft:hover {
+    background-color: #555;
+}
+
+.draft-source-metadata {
+    margin: 12px 0 18px 0;
+    padding: 12px;
+    background: #ffffff99;
+    border: 1px dashed #00000033;
+    border-radius: 8px;
+    max-width: 70vw;
+}
+
+.draft-source-metadata h4 {
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.draft-source-metadata h5 {
+    margin-top: 12px;
+    margin-bottom: 6px;
+    font-weight: bold;
+}
+
+.draft-source-help-text,
+.draft-source-summary {
+    margin: 6px 0;
+    font-size: 13px;
+}
+
+.draft-source-summary {
+    font-weight: bold;
+}
+
+.draft-source-raw-list {
+    display: grid;
+    grid-template-columns: minmax(120px, 20%) 1fr;
+    gap: 6px 12px;
+    margin-top: 10px;
+}
+
+.draft-source-raw-list dt {
+    font-weight: bold;
+}
+
+.draft-source-raw-list dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.draft-source-mapped-list {
+    background: #ffffff66;
+    padding: 8px;
+    border-radius: 6px;
+}
+
+.draft-source-unmapped-list {
+    background: #fff7d966;
+    padding: 8px;
+    border-radius: 6px;
+}

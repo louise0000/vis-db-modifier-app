@@ -95,6 +95,188 @@ function appendFormField(container, key, value) {
 }
 
 
+// Draft-record bridge for future capture/import workflows.
+// This does not persist sourceMeta yet; it only proves that incoming data can
+// prefill the existing Add Single Record form for human review before saving.
+const testDraftRecord = {
+    proposedType: 'artworkBook',
+    proposedInfo: {
+        label: 'Test Imported Book',
+        type: 'artworkBook',
+        date: '2026',
+        article: '',
+        note: 'Imported draft note',
+        note_jp: ''
+    },
+    sourceMeta: {
+        source: 'manual-test',
+        capturedAt: new Date().toISOString(),
+        raw: {
+            publisher: 'Imaginary Press',
+            isbn: '000-0-00-000000-0',
+            pages: '321',
+            url: 'https://example.com/test-book'
+        }
+    },
+    duplicateWarnings: []
+};
+
+function clearDraftSourceMetadata() {
+    const panel = document.getElementById('draft-source-metadata');
+    if (!panel) return;
+    panel.innerHTML = '';
+    panel.style.display = 'none';
+}
+
+function getSourceFieldMapping(draftRecord = {}, templateRecord = {}) {
+    const rawFields = draftRecord.sourceMeta?.raw || {};
+    const templateInfoKeys = new Set(Object.keys(templateRecord.info || {}));
+    const proposedInfoKeys = new Set(Object.keys(draftRecord.proposedInfo || {}));
+    const mappedFields = {};
+    const unmappedFields = {};
+
+    Object.entries(rawFields).forEach(([key, value]) => {
+        if (templateInfoKeys.has(key) || proposedInfoKeys.has(key)) {
+            mappedFields[key] = value;
+        } else {
+            unmappedFields[key] = value;
+        }
+    });
+
+    return { mappedFields, unmappedFields };
+}
+
+function appendDraftMetadataList(panel, headingText, fields, className) {
+    if (!Object.keys(fields).length) return;
+
+    const heading = document.createElement('h5');
+    heading.textContent = headingText;
+    panel.appendChild(heading);
+
+    const rawList = document.createElement('dl');
+    rawList.classList.add('draft-source-raw-list', className);
+
+    Object.entries(fields).forEach(([key, value]) => {
+        const term = document.createElement('dt');
+        term.textContent = key;
+        const description = document.createElement('dd');
+        description.textContent = formatValueForEditor(value);
+        rawList.appendChild(term);
+        rawList.appendChild(description);
+    });
+
+    panel.appendChild(rawList);
+}
+
+function renderDraftSourceMetadata(draftRecord = {}, templateRecord = {}) {
+    const panel = document.getElementById('draft-source-metadata');
+    if (!panel) return;
+
+    const sourceMeta = draftRecord.sourceMeta || {};
+    const duplicateWarnings = Array.isArray(draftRecord.duplicateWarnings)
+        ? draftRecord.duplicateWarnings
+        : [];
+    const { mappedFields, unmappedFields } = getSourceFieldMapping(draftRecord, templateRecord);
+
+    if (!Object.keys(mappedFields).length && !Object.keys(unmappedFields).length && !duplicateWarnings.length) {
+        clearDraftSourceMetadata();
+        return;
+    }
+
+    panel.innerHTML = '';
+
+    const heading = document.createElement('h4');
+    heading.textContent = 'Imported Source Metadata';
+    panel.appendChild(heading);
+
+    const help = document.createElement('p');
+    help.classList.add('draft-source-help-text');
+    help.textContent = 'Mapped fields have been prefilled into the editable form. Unmapped fields are shown for review only and are not saved by this test bridge.';
+    panel.appendChild(help);
+
+    if (sourceMeta.source || sourceMeta.capturedAt) {
+        const sourceSummary = document.createElement('p');
+        sourceSummary.classList.add('draft-source-summary');
+        sourceSummary.textContent = [sourceMeta.source, sourceMeta.capturedAt].filter(Boolean).join(' / ');
+        panel.appendChild(sourceSummary);
+    }
+
+    appendDraftMetadataList(panel, 'Mapped into editable form', mappedFields, 'draft-source-mapped-list');
+    appendDraftMetadataList(panel, 'Unmapped source fields', unmappedFields, 'draft-source-unmapped-list');
+
+    if (duplicateWarnings.length) {
+        const warningHeading = document.createElement('h5');
+        warningHeading.textContent = 'Duplicate warnings';
+        panel.appendChild(warningHeading);
+
+        const warningList = document.createElement('ul');
+        duplicateWarnings.forEach(warning => {
+            const item = document.createElement('li');
+            item.textContent = formatValueForEditor(warning);
+            warningList.appendChild(item);
+        });
+        panel.appendChild(warningList);
+    }
+
+    panel.style.display = 'block';
+}
+
+function createDraftTemplateRecord(templateRecord = {}, draftRecord = {}) {
+    const templateInfo = templateRecord.info || {};
+    const proposedInfo = { ...(draftRecord.proposedInfo || {}) };
+    const rawFields = draftRecord.sourceMeta?.raw || {};
+    const proposedType = draftRecord.proposedType || proposedInfo.type || templateInfo.type || '';
+
+    // If source metadata contains a field already known to this record type
+    // (for example artworkBook.pages), treat it as mapped data and prefill it.
+    // Unknown source fields stay read-only in Imported Source Metadata.
+    Object.entries(rawFields).forEach(([key, value]) => {
+        if (Object.prototype.hasOwnProperty.call(templateInfo, key) && proposedInfo[key] === undefined) {
+            proposedInfo[key] = value;
+        }
+    });
+
+    return {
+        parentId: Array.isArray(draftRecord.proposedParentId) ? draftRecord.proposedParentId : [],
+        children: Array.isArray(draftRecord.proposedChildren) ? draftRecord.proposedChildren : [],
+        info: ensureJapaneseNoteField({
+            ...templateInfo,
+            ...proposedInfo,
+            type: proposedType
+        })
+    };
+}
+
+async function loadDraftRecordIntoAddForm(draftRecord) {
+    const typeSelect = document.getElementById('type-select');
+    const recordForm = document.getElementById('record-form');
+    const selectedType = draftRecord.proposedType || draftRecord.proposedInfo?.type;
+
+    if (!selectedType) {
+        alert('Draft record does not specify a type.');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/type/${encodeURIComponent(selectedType)}`);
+        const templateRecord = await response.json();
+
+        if (!response.ok || !templateRecord?.info) {
+            alert(`No template found for ${selectedType}.`);
+            return;
+        }
+
+        typeSelect.value = selectedType;
+        generateForm(createDraftTemplateRecord(templateRecord, draftRecord));
+        renderDraftSourceMetadata(draftRecord, templateRecord);
+        recordForm.style.display = 'block';
+    } catch (error) {
+        console.error('Error loading draft record:', error);
+        alert('Failed to load draft record.');
+    }
+}
+
+
 // Function to render results
 async function renderResults(data, resultElementId, multiple = false) {
     const container = document.getElementById(resultElementId);
@@ -824,6 +1006,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Handle type selection
     typeSelect.addEventListener('change', async () => {
         const selectedType = typeSelect.value;
+        clearDraftSourceMetadata();
 
         if (selectedType) {
             try {
@@ -847,6 +1030,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('record-form').style.display = 'none';
         }
     });
+
+    const loadTestDraftButton = document.getElementById('load-test-draft');
+    if (loadTestDraftButton) {
+        loadTestDraftButton.addEventListener('click', () => {
+            loadDraftRecordIntoAddForm(testDraftRecord);
+        });
+    }
 
     // Handle form submission
     document.getElementById('new-record-form').addEventListener('submit', async (event) => {
@@ -891,6 +1081,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 alert(result.message || 'Record added successfully.');
                 // Reset the form and hide it
                 event.target.reset();
+                clearDraftSourceMetadata();
                 document.getElementById('record-form').style.display = 'none';
             } else {
                 alert(result.error || 'Failed to add record.');
