@@ -2763,15 +2763,19 @@ function normaliseImageQueueRecord(record) {
         date: info.date || record?.date || '',
         imgURL: info.imgURL || info.image || '',
         imageCandidates: Array.isArray(record?.imageCandidates) ? record.imageCandidates : [],
+        imageCandidateDetails: Array.isArray(record?.imageCandidateDetails) ? record.imageCandidateDetails : [],
         selectedImageCandidateUrl: record?.selectedImageCandidateUrl || '',
         selectedImageCandidateDownload: record?.selectedImageCandidateDownload || null,
         selectedImageCandidateCloud: record?.selectedImageCandidateCloud || null,
+        imageCandidateFetchStatus: record?.imageCandidateFetchStatus || '',
+        imageCandidateFetchError: record?.imageCandidateFetchError || '',
         imageCandidateDownloadStatus: record?.imageCandidateDownloadStatus || '',
         imageCandidateDownloadError: record?.imageCandidateDownloadError || '',
         imageCandidateCloudStatus: record?.imageCandidateCloudStatus || '',
         imageCandidateCloudError: record?.imageCandidateCloudError || '',
         imageCandidatesRejected: Boolean(record?.imageCandidatesRejected),
         manualCandidateText: record?.manualCandidateText || '',
+        lastImageCandidateQuery: record?.lastImageCandidateQuery || '',
         raw: record
     };
 }
@@ -2816,6 +2820,117 @@ function parseManualImageCandidateUrls(rawText) {
             return true;
         })
         .slice(0, 5);
+}
+
+
+function normaliseImageCandidateDetailsFromUrls(urls = [], provider = 'manual') {
+    return urls.map((url, index) => ({
+        imageUrl: url,
+        originalUrl: url,
+        thumbnailUrl: url,
+        title: '',
+        source: provider === 'manual' ? 'Manual URL' : '',
+        sourcePageUrl: '',
+        provider,
+        position: index + 1
+    }));
+}
+
+function getImageCandidateDetail(record, url) {
+    if (!record || !Array.isArray(record.imageCandidateDetails)) return null;
+    return record.imageCandidateDetails.find(candidate => candidate.imageUrl === url || candidate.originalUrl === url) || null;
+}
+
+function clearImageCandidateFetchState(record) {
+    if (!record) return;
+    record.imageCandidateFetchStatus = '';
+    record.imageCandidateFetchError = '';
+}
+
+async function fetchSerpApiImageCandidatesForRecord(record) {
+    if (!record) return;
+
+    const query = buildImageSearchQuery(record);
+    if (!query) {
+        alert('This record does not produce a usable image search query.');
+        return;
+    }
+
+    record.imageCandidateFetchStatus = 'fetching';
+    record.imageCandidateFetchError = '';
+    record.imageCandidatesRejected = false;
+    renderImageQueue();
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/image-queue/serpapi-image-candidates`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                query,
+                recordId: record.id,
+                label: record.label,
+                type: record.type,
+                limit: 5
+            })
+        });
+
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (jsonError) {
+            payload = null;
+        }
+
+        if (!response.ok) {
+            throw new Error(payload?.error || `SerpApi image search failed with status ${response.status}.`);
+        }
+
+        const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+        if (!candidates.length) {
+            record.imageCandidates = [];
+            record.imageCandidateDetails = [];
+            record.selectedImageCandidateUrl = '';
+            clearImageCandidateDownloadState(record);
+            record.imageCandidateFetchStatus = 'empty';
+            record.imageCandidateFetchError = 'No image candidates returned.';
+            record.lastImageCandidateQuery = query;
+            renderImageQueue();
+            return;
+        }
+
+        const urls = candidates.map(candidate => candidate.imageUrl).filter(Boolean).slice(0, 5);
+        const previousSelection = record.selectedImageCandidateUrl;
+        record.imageCandidates = urls;
+        record.imageCandidateDetails = candidates.slice(0, 5);
+        record.manualCandidateText = '';
+        record.selectedImageCandidateUrl = urls.includes(record.selectedImageCandidateUrl)
+            ? record.selectedImageCandidateUrl
+            : '';
+        if (previousSelection !== record.selectedImageCandidateUrl) {
+            clearImageCandidateDownloadState(record);
+        }
+        record.imageCandidatesRejected = false;
+        record.imageCandidateFetchStatus = 'loaded';
+        record.imageCandidateFetchError = '';
+        record.lastImageCandidateQuery = payload.query || query;
+    } catch (error) {
+        console.error('Error fetching SerpApi image candidates:', error);
+        record.imageCandidateFetchStatus = 'error';
+        record.imageCandidateFetchError = error.message || String(error);
+    }
+
+    renderImageQueue();
+}
+
+async function fetchSerpApiImageCandidatesForQueue() {
+    if (!imageQueueRecords.length) {
+        alert('Queue records before fetching image candidates.');
+        return;
+    }
+
+    for (const record of imageQueueRecords) {
+        await fetchSerpApiImageCandidatesForRecord(record);
+    }
 }
 
 function clearImageCandidateDownloadState(record) {
@@ -2930,7 +3045,8 @@ async function finaliseSelectedImageCandidate(record) {
                 recordId: record.id,
                 label: record.label,
                 selectedImageCandidateUrl: record.selectedImageCandidateUrl,
-                selectedImageCandidateDownload: record.selectedImageCandidateDownload
+                selectedImageCandidateDownload: record.selectedImageCandidateDownload,
+                selectedImageCandidateMeta: getImageCandidateDetail(record, record.selectedImageCandidateUrl)
             })
         });
 
@@ -3012,12 +3128,12 @@ function renderImageCandidateReview(record) {
 
     const heading = document.createElement('div');
     heading.classList.add('image-candidate-heading');
-    heading.textContent = 'Manual image candidates';
+    heading.textContent = 'Image candidates';
     container.appendChild(heading);
 
     const help = document.createElement('p');
     help.classList.add('image-candidate-help-text');
-    help.textContent = 'Paste up to five image URLs, one per line. You can preview/select, validate-download, then optionally upload the selected local preview to cloud storage.';
+    help.textContent = 'Fetch Google Images candidates through SerpApi, or paste fallback image URLs manually. Select one, validate/download it, then upload the local preview to cloud storage.';
     container.appendChild(help);
 
     const textarea = document.createElement('textarea');
@@ -3032,6 +3148,15 @@ function renderImageCandidateReview(record) {
     const actions = document.createElement('div');
     actions.classList.add('image-candidate-actions');
 
+    const fetchButton = document.createElement('button');
+    fetchButton.type = 'button';
+    fetchButton.textContent = record.imageCandidateFetchStatus === 'fetching'
+        ? 'Fetching...'
+        : 'Fetch SerpApi Candidates';
+    fetchButton.disabled = record.imageCandidateFetchStatus === 'fetching';
+    fetchButton.addEventListener('click', () => fetchSerpApiImageCandidatesForRecord(record));
+    actions.appendChild(fetchButton);
+
     const previewButton = document.createElement('button');
     previewButton.type = 'button';
     previewButton.textContent = 'Preview Candidate URLs';
@@ -3044,6 +3169,9 @@ function renderImageCandidateReview(record) {
 
         record.manualCandidateText = textarea.value;
         record.imageCandidates = urls;
+        record.imageCandidateDetails = normaliseImageCandidateDetailsFromUrls(urls);
+        clearImageCandidateFetchState(record);
+        record.lastImageCandidateQuery = '';
         const previousSelection = record.selectedImageCandidateUrl;
         record.selectedImageCandidateUrl = urls.includes(record.selectedImageCandidateUrl)
             ? record.selectedImageCandidateUrl
@@ -3071,7 +3199,17 @@ function renderImageCandidateReview(record) {
 
     const status = document.createElement('div');
     status.classList.add('image-candidate-status');
-    if (record.imageCandidateCloudStatus === 'uploading') {
+    if (record.imageCandidateFetchStatus === 'fetching') {
+        status.textContent = `Fetching SerpApi image candidates for: ${buildImageSearchQuery(record)}`;
+    } else if (record.imageCandidateFetchStatus === 'loaded') {
+        status.textContent = `SerpApi candidates loaded${record.lastImageCandidateQuery ? ` for: ${record.lastImageCandidateQuery}` : ''}. Choose one candidate or reject all.`;
+    } else if (record.imageCandidateFetchStatus === 'empty') {
+        status.classList.add('image-candidate-download-error');
+        status.textContent = `SerpApi returned no candidates${record.lastImageCandidateQuery ? ` for: ${record.lastImageCandidateQuery}` : ''}.`;
+    } else if (record.imageCandidateFetchStatus === 'error') {
+        status.classList.add('image-candidate-download-error');
+        status.textContent = `SerpApi fetch failed: ${record.imageCandidateFetchError || 'Unknown error.'}`;
+    } else if (record.imageCandidateCloudStatus === 'uploading') {
         status.textContent = 'Uploading selected local preview to cloud storage and saving ImageKit URL...';
     } else if (record.imageCandidateCloudStatus === 'saved') {
         status.textContent = 'Cloud image saved to this record.';
@@ -3134,6 +3272,7 @@ function renderImageCandidateReview(record) {
         grid.classList.add('image-candidate-grid');
 
         record.imageCandidates.forEach((url, index) => {
+            const detail = getImageCandidateDetail(record, url) || {};
             const candidate = document.createElement('div');
             candidate.classList.add('image-candidate-card');
             if (url === record.selectedImageCandidateUrl) {
@@ -3142,8 +3281,8 @@ function renderImageCandidateReview(record) {
 
             const image = document.createElement('img');
             image.classList.add('image-candidate-preview-image');
-            image.src = url;
-            image.alt = `${record.label || 'Record'} candidate ${index + 1}`;
+            image.src = detail.thumbnailUrl || url;
+            image.alt = detail.title || `${record.label || 'Record'} candidate ${index + 1}`;
             image.addEventListener('error', () => {
                 candidate.classList.add('image-candidate-broken');
             });
@@ -3169,14 +3308,26 @@ function renderImageCandidateReview(record) {
             openLink.href = url;
             openLink.target = '_blank';
             openLink.rel = 'noopener noreferrer';
-            openLink.textContent = 'Open';
+            openLink.textContent = 'Open image';
             candidateActions.appendChild(openLink);
+
+            if (detail.sourcePageUrl) {
+                const sourceLink = document.createElement('a');
+                sourceLink.href = detail.sourcePageUrl;
+                sourceLink.target = '_blank';
+                sourceLink.rel = 'noopener noreferrer';
+                sourceLink.textContent = 'Source page';
+                candidateActions.appendChild(sourceLink);
+            }
 
             candidate.appendChild(candidateActions);
 
             const urlText = document.createElement('div');
             urlText.classList.add('image-candidate-url-text');
-            urlText.textContent = url;
+            const bits = [detail.source, detail.title, `${detail.originalWidth || '?'}×${detail.originalHeight || '?'}`]
+                .filter(Boolean);
+            urlText.textContent = bits.length ? `${bits.join(' · ')}
+${url}` : url;
             candidate.appendChild(urlText);
 
             grid.appendChild(candidate);
@@ -3245,7 +3396,7 @@ function renderImageQueue() {
 
         const query = document.createElement('div');
         query.classList.add('image-queue-card-meta');
-        query.textContent = `Future query: ${buildImageSearchQuery(record)}`;
+        query.textContent = `SerpApi query: ${buildImageSearchQuery(record)}`;
         details.appendChild(query);
 
         details.appendChild(renderImageCandidateReview(record));
@@ -3380,7 +3531,7 @@ function renderImageQueryPreview() {
     preview.appendChild(heading);
 
     const help = document.createElement('p');
-    help.textContent = 'These are the queries a future image-candidate fetcher would send to a search API or scraper. No external request is made in this scaffold.';
+    help.textContent = 'These are the queries sent to SerpApi Google Images when you fetch candidates. Each fetch consumes one SerpApi search unless served from their cache.';
     preview.appendChild(help);
 
     const list = document.createElement('ol');
@@ -3425,6 +3576,7 @@ function initialiseImageQueueScaffold() {
     const buildQueriesButton = document.getElementById('image-queue-build-queries');
     const clearButton = document.getElementById('image-queue-clear');
     const randomPeopleButton = document.getElementById('image-queue-random-people');
+    const fetchSerpApiButton = document.getElementById('image-queue-fetch-serpapi');
 
     if (searchButton) {
         searchButton.addEventListener('click', searchRecordsForImageQueue);
@@ -3448,6 +3600,10 @@ function initialiseImageQueueScaffold() {
             imageQueueRecords.splice(0, imageQueueRecords.length);
             renderImageQueue();
         });
+    }
+
+    if (fetchSerpApiButton) {
+        fetchSerpApiButton.addEventListener('click', fetchSerpApiImageCandidatesForQueue);
     }
 
     if (randomPeopleButton) {

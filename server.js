@@ -40,6 +40,7 @@ let latestDraftCapture = null;
 const IMAGE_CANDIDATE_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_CANDIDATE_PREVIEW_DIR = path.join(__dirname, 'public', '_image-candidate-preview');
 const IMAGE_CLOUD_DEFAULT_PREFIX = 'reference-images';
+const SERPAPI_IMAGE_CANDIDATE_LIMIT = 5;
 
 const ROOT_RELATIONSHIP_FIELDS = ['parentId', 'children'];
 
@@ -151,6 +152,39 @@ function getLocalImageCandidatePreviewPath(previewUrl = '') {
   }
 
   return { filename, filePath };
+}
+
+function getSerpApiKey() {
+  return String(process.env.SERPAPI_API_KEY || process.env.SERPAPI_KEY || '').trim();
+}
+
+function normaliseSerpApiImageCandidate(item = {}, index = 0, query = '') {
+  const imageUrl = String(item.original || item.image || item.link || '').trim();
+  if (!/^https?:\/\//i.test(imageUrl)) return null;
+
+  return {
+    imageUrl,
+    originalUrl: imageUrl,
+    thumbnailUrl: String(item.thumbnail || '').trim(),
+    sourcePageUrl: String(item.link || '').trim(),
+    title: String(item.title || '').trim(),
+    source: String(item.source || '').trim(),
+    originalWidth: item.original_width || null,
+    originalHeight: item.original_height || null,
+    position: item.position || index + 1,
+    provider: 'serpapi-google-images',
+    query
+  };
+}
+
+function dedupeImageCandidates(candidates = []) {
+  const seen = new Set();
+  return candidates.filter(candidate => {
+    if (!candidate?.imageUrl) return false;
+    if (seen.has(candidate.imageUrl)) return false;
+    seen.add(candidate.imageUrl);
+    return true;
+  });
 }
 
 
@@ -1666,6 +1700,97 @@ app.get('/api/reference/image-queue/random-missing-images', async (req, res) => 
   }
 });
 
+app.post('/api/reference/image-queue/serpapi-image-candidates', async (req, res) => {
+  try {
+    const apiKey = getSerpApiKey();
+    const query = String(req.body?.query || '').trim();
+    const rawLimit = Number.parseInt(req.body?.limit, 10);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(rawLimit, SERPAPI_IMAGE_CANDIDATE_LIMIT))
+      : SERPAPI_IMAGE_CANDIDATE_LIMIT;
+
+    if (!apiKey) {
+      return res.status(503).json({ error: 'Set SERPAPI_API_KEY in .env before fetching image candidates.' });
+    }
+
+    if (!query) {
+      return res.status(400).json({ error: 'query is required.' });
+    }
+
+    const params = new URLSearchParams({
+      engine: 'google_images',
+      q: query,
+      api_key: apiKey,
+      ijn: '0',
+      hl: String(process.env.SERPAPI_GOOGLE_HL || 'en').trim() || 'en',
+      gl: String(process.env.SERPAPI_GOOGLE_GL || 'uk').trim() || 'uk',
+      safe: String(process.env.SERPAPI_GOOGLE_SAFE || 'active').trim() || 'active',
+      output: 'json'
+    });
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+
+    let response;
+    try {
+      response = await fetch(`https://serpapi.com/search?${params.toString()}`, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json' }
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (jsonError) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const message = payload?.error || `SerpApi request failed with status ${response.status}.`;
+      return res.status(response.status).json({ error: message });
+    }
+
+    if (payload?.error) {
+      return res.status(502).json({ error: String(payload.error) });
+    }
+
+    const rawResults = Array.isArray(payload?.images_results)
+      ? payload.images_results
+      : (Array.isArray(payload?.image_results) ? payload.image_results : []);
+
+    const candidates = dedupeImageCandidates(
+      rawResults
+        .map((item, index) => normaliseSerpApiImageCandidate(item, index, query))
+        .filter(Boolean)
+        .filter(candidate => !candidate.unsafe)
+    ).slice(0, limit);
+
+    res.json({
+      success: true,
+      query,
+      provider: 'serpapi-google-images',
+      rawCount: rawResults.length,
+      count: candidates.length,
+      candidates,
+      searchMetadata: {
+        id: payload?.search_metadata?.id || '',
+        status: payload?.search_metadata?.status || '',
+        googleImagesUrl: payload?.search_metadata?.google_images_url || '',
+        totalTimeTaken: payload?.search_metadata?.total_time_taken || null
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching SerpApi image candidates:', err);
+    const message = err.name === 'AbortError'
+      ? 'SerpApi image candidate request timed out.'
+      : err.toString();
+    res.status(500).json({ error: message });
+  }
+});
+
 
 // Validate and download one selected image candidate into a local temp preview folder.
 // This is intentionally non-destructive: it does not upload to cloud storage and does
@@ -1786,6 +1911,9 @@ app.post('/api/reference/image-queue/finalise-image-candidate', async (req, res)
     const recordId = String(req.body?.recordId || '').trim();
     const selectedImageCandidateUrl = String(req.body?.selectedImageCandidateUrl || '').trim();
     const selectedDownload = req.body?.selectedImageCandidateDownload || {};
+    const selectedMeta = req.body?.selectedImageCandidateMeta && typeof req.body.selectedImageCandidateMeta === 'object'
+      ? req.body.selectedImageCandidateMeta
+      : {};
     const previewUrl = String(selectedDownload?.previewUrl || '').trim();
 
     if (!recordId) {
@@ -1859,10 +1987,20 @@ app.post('/api/reference/image-queue/finalise-image-candidate', async (req, res)
       : {};
 
     const imageSource = {
-      method: 'manual-image-candidate',
+      method: selectedMeta?.provider === 'serpapi-google-images'
+        ? 'serpapi-google-image-candidate'
+        : 'manual-image-candidate',
+      provider: selectedMeta?.provider || 'manual',
       selectedAt: savedAt,
       originalImageUrl: selectedImageCandidateUrl,
       downloadedFinalUrl: selectedDownload?.finalUrl || selectedImageCandidateUrl,
+      sourcePageUrl: selectedMeta?.sourcePageUrl || '',
+      source: selectedMeta?.source || '',
+      title: selectedMeta?.title || '',
+      searchQuery: selectedMeta?.query || '',
+      thumbnailUrl: selectedMeta?.thumbnailUrl || '',
+      originalWidth: selectedMeta?.originalWidth || null,
+      originalHeight: selectedMeta?.originalHeight || null,
       localPreviewUrl: previewUrl,
       gcsBucket: config.bucket,
       gcsObjectName: objectName,
