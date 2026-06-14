@@ -42,3 +42,7 @@ If your modifier app runs on a different port, change the port in the extension 
 - It does not scrape every website intelligently.
 - It does not save anything directly to Mongo.
 - It does not bypass the modifier app review step.
+
+## 0.1.1 capture quality note
+
+The Wikipedia capture now tries a more robust birth/death year parse from structured dates, infobox rows, and lifespan text such as “1932 – 2014”. On Wikipedia pages, it also looks for a Japanese Wikipedia language link and maps that page title into `label_jp` while preserving the Japanese page URL in `sourceMeta.raw`.

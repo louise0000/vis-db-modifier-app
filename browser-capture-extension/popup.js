@@ -83,31 +83,97 @@ function extractDraftFromCurrentPage(requestedType) {
     return title.replace(/\s*-\s*Wikipedia\s*$/i, '').trim();
   }
 
-  function parseYearsFromDocument(text) {
-    const bday = document.querySelector('.bday')?.textContent?.trim() || '';
-    const bdayYear = bday.match(/(\d{3,4})/)?.[1] || '';
+  function yearsFromText(rawText) {
+    return Array.from(String(rawText || '').matchAll(/(?:1[0-9]{3}|20[0-9]{2})/g)).map(match => match[0]);
+  }
 
-    const deathDate = Array.from(document.querySelectorAll('.dday, .deathdate'))
-      .map(el => el.textContent || '')
+  function yearFromStructuredDate(selectorList) {
+    const text = Array.from(document.querySelectorAll(selectorList))
+      .map(el => el.getAttribute('datetime') || el.textContent || '')
       .join(' ');
-    const deathYear = deathDate.match(/(\d{3,4})/)?.[1] || '';
+    return yearsFromText(text)[0] || '';
+  }
 
-    if (bdayYear || deathYear) {
-      return { birth: bdayYear, death: deathYear };
+  function infoboxRowYear(labelPattern) {
+    const rows = Array.from(document.querySelectorAll('.infobox tr'));
+    for (const row of rows) {
+      const header = (row.querySelector('th')?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!labelPattern.test(header)) continue;
+      const years = yearsFromText(row.textContent || '');
+      if (years.length) return years[0];
+    }
+    return '';
+  }
+
+  function yearsFromLifespanText(text) {
+    const source = String(text || '').replace(/\s+/g, ' ');
+    const parentheticals = Array.from(source.matchAll(/\(([^)]*[–—-][^)]*)\)/g)).map(match => match[1]);
+    for (const segment of parentheticals) {
+      const years = yearsFromText(segment);
+      if (years.length >= 2) {
+        return { birth: years[0], death: years[years.length - 1] };
+      }
     }
 
-    const rangeMatch = (text || '').match(/(?:\(|\b)(\d{3,4})\s*[–—-]\s*(\d{3,4})(?:\)|\b)/);
-    if (rangeMatch) {
-      return { birth: rangeMatch[1], death: rangeMatch[2] };
+    const directYears = source.match(/(?:born\s+)?([^.;]{0,80})(?:1[0-9]{3}|20[0-9]{2})[^.;]{0,60}[–—-][^.;]{0,60}(?:1[0-9]{3}|20[0-9]{2})/i);
+    if (directYears) {
+      const years = yearsFromText(directYears[0]);
+      if (years.length >= 2) return { birth: years[0], death: years[years.length - 1] };
     }
 
     return { birth: '', death: '' };
+  }
+
+  function parseYearsFromDocument(text) {
+    const birthFromBday = yearFromStructuredDate('.bday, .birthdate, .birth-date, time[itemprop="birthDate"]');
+    const deathFromDday = yearFromStructuredDate('.dday, .deathdate, .death-date, time[itemprop="deathDate"]');
+
+    const birthFromInfobox = infoboxRowYear(/^(born|birth)$/i);
+    const deathFromInfobox = infoboxRowYear(/^(died|death)$/i);
+
+    const lifespanYears = yearsFromLifespanText(text);
+
+    return {
+      birth: birthFromBday || birthFromInfobox || lifespanYears.birth || '',
+      death: deathFromDday || deathFromInfobox || lifespanYears.death || ''
+    };
   }
 
   function extractWikidataIdFromDocument() {
     const wikidataLink = document.querySelector('li#t-wikibase a, a[href*="wikidata.org/wiki/Q"]');
     const href = wikidataLink?.href || '';
     return href.match(/\/wiki\/(Q\d+)/)?.[1] || '';
+  }
+
+  function titleFromWikipediaUrl(href) {
+    try {
+      const url = new URL(href, window.location.href);
+      const marker = '/wiki/';
+      const markerIndex = url.pathname.indexOf(marker);
+      if (markerIndex === -1) return '';
+      const encodedTitle = url.pathname.slice(markerIndex + marker.length);
+      return decodeURIComponent(encodedTitle).replace(/_/g, ' ').trim();
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function extractJapaneseWikipediaInfoFromDocument() {
+    const candidates = Array.from(document.querySelectorAll([
+      'link[rel="alternate"][hreflang="ja"]',
+      'a[hreflang="ja"]',
+      'li.interlanguage-link.interwiki-ja a',
+      'a[href^="https://ja.wikipedia.org/wiki/"]'
+    ].join(',')));
+
+    const href = candidates
+      .map(el => el.href || el.getAttribute('href') || '')
+      .find(value => /https?:\/\/ja\.wikipedia\.org\/wiki\//i.test(value)) || '';
+
+    return {
+      url: href,
+      title: href ? titleFromWikipediaUrl(href) : ''
+    };
   }
 
   const hostname = window.location.hostname;
@@ -118,12 +184,14 @@ function extractDraftFromCurrentPage(requestedType) {
   const imgURL = imageFromDocument();
   const years = parseYearsFromDocument(firstParagraph);
   const wikidataQID = extractWikidataIdFromDocument();
+  const japaneseWikipedia = isWikipedia ? extractJapaneseWikipediaInfoFromDocument() : { title: '', url: '' };
   const inferredType = isWikipedia ? 'theorist' : 'artworkBook';
   const proposedType = requestedType === 'auto' ? inferredType : requestedType;
   const capturedAt = new Date().toISOString();
 
   const proposedInfo = {
     label: title,
+    label_jp: japaneseWikipedia.title || '',
     type: proposedType,
     note: firstParagraph,
     note_jp: '',
@@ -159,7 +227,9 @@ function extractDraftFromCurrentPage(requestedType) {
         imgURL,
         birth: years.birth,
         death: years.death,
-        wikidataQID
+        wikidataQID,
+        japaneseWikipediaTitle: japaneseWikipedia.title,
+        japaneseWikipediaUrl: japaneseWikipedia.url
       }
     },
     duplicateWarnings: []
