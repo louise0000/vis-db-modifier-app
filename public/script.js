@@ -2762,6 +2762,10 @@ function normaliseImageQueueRecord(record) {
         death: info.death || '',
         date: info.date || record?.date || '',
         imgURL: info.imgURL || info.image || '',
+        imageCandidates: Array.isArray(record?.imageCandidates) ? record.imageCandidates : [],
+        selectedImageCandidateUrl: record?.selectedImageCandidateUrl || '',
+        imageCandidatesRejected: Boolean(record?.imageCandidatesRejected),
+        manualCandidateText: record?.manualCandidateText || '',
         raw: record
     };
 }
@@ -2790,6 +2794,149 @@ function buildImageSearchQuery(record) {
         : (record.type === 'artworkBook' ? 'book cover' : 'image');
 
     return [label, datePart, hint].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function parseManualImageCandidateUrls(rawText) {
+    const seen = new Set();
+
+    return String(rawText || '')
+        .split(/\n+/)
+        .map(url => url.trim())
+        .filter(Boolean)
+        .filter(url => /^https?:\/\//i.test(url))
+        .filter(url => {
+            if (seen.has(url)) return false;
+            seen.add(url);
+            return true;
+        })
+        .slice(0, 5);
+}
+
+function renderImageCandidateReview(record) {
+    const container = document.createElement('div');
+    container.classList.add('image-candidate-review');
+
+    const heading = document.createElement('div');
+    heading.classList.add('image-candidate-heading');
+    heading.textContent = 'Manual image candidates';
+    container.appendChild(heading);
+
+    const help = document.createElement('p');
+    help.classList.add('image-candidate-help-text');
+    help.textContent = 'Paste up to five image URLs, one per line. This only previews/selects candidates; it does not download, upload, or write to the database.';
+    container.appendChild(help);
+
+    const textarea = document.createElement('textarea');
+    textarea.classList.add('image-candidate-url-input');
+    textarea.placeholder = 'https://example.com/image-1.jpg\nhttps://example.com/image-2.jpg';
+    textarea.value = record.manualCandidateText || record.imageCandidates.join('\n');
+    textarea.addEventListener('input', () => {
+        record.manualCandidateText = textarea.value;
+    });
+    container.appendChild(textarea);
+
+    const actions = document.createElement('div');
+    actions.classList.add('image-candidate-actions');
+
+    const previewButton = document.createElement('button');
+    previewButton.type = 'button';
+    previewButton.textContent = 'Preview Candidate URLs';
+    previewButton.addEventListener('click', () => {
+        const urls = parseManualImageCandidateUrls(textarea.value);
+        if (!urls.length) {
+            alert('Paste at least one valid http/https image URL.');
+            return;
+        }
+
+        record.manualCandidateText = textarea.value;
+        record.imageCandidates = urls;
+        record.selectedImageCandidateUrl = urls.includes(record.selectedImageCandidateUrl)
+            ? record.selectedImageCandidateUrl
+            : '';
+        record.imageCandidatesRejected = false;
+        renderImageQueue();
+    });
+    actions.appendChild(previewButton);
+
+    const rejectButton = document.createElement('button');
+    rejectButton.type = 'button';
+    rejectButton.textContent = 'Reject All';
+    rejectButton.addEventListener('click', () => {
+        record.selectedImageCandidateUrl = '';
+        record.imageCandidatesRejected = true;
+        renderImageQueue();
+    });
+    actions.appendChild(rejectButton);
+
+    container.appendChild(actions);
+
+    const status = document.createElement('div');
+    status.classList.add('image-candidate-status');
+    if (record.selectedImageCandidateUrl) {
+        status.textContent = 'Selected candidate only. No database write yet.';
+    } else if (record.imageCandidatesRejected) {
+        status.textContent = 'All candidates rejected for this queue session.';
+    } else if (record.imageCandidates.length) {
+        status.textContent = 'Preview loaded. Choose one candidate or reject all.';
+    } else {
+        status.textContent = 'No candidates previewed yet.';
+    }
+    container.appendChild(status);
+
+    if (record.imageCandidates.length) {
+        const grid = document.createElement('div');
+        grid.classList.add('image-candidate-grid');
+
+        record.imageCandidates.forEach((url, index) => {
+            const candidate = document.createElement('div');
+            candidate.classList.add('image-candidate-card');
+            if (url === record.selectedImageCandidateUrl) {
+                candidate.classList.add('selected');
+            }
+
+            const image = document.createElement('img');
+            image.classList.add('image-candidate-preview-image');
+            image.src = url;
+            image.alt = `${record.label || 'Record'} candidate ${index + 1}`;
+            image.addEventListener('error', () => {
+                candidate.classList.add('image-candidate-broken');
+            });
+            candidate.appendChild(image);
+
+            const candidateActions = document.createElement('div');
+            candidateActions.classList.add('image-candidate-card-actions');
+
+            const selectButton = document.createElement('button');
+            selectButton.type = 'button';
+            selectButton.textContent = url === record.selectedImageCandidateUrl ? 'Selected' : 'Select';
+            selectButton.addEventListener('click', () => {
+                record.selectedImageCandidateUrl = url;
+                record.imageCandidatesRejected = false;
+                renderImageQueue();
+            });
+            candidateActions.appendChild(selectButton);
+
+            const openLink = document.createElement('a');
+            openLink.href = url;
+            openLink.target = '_blank';
+            openLink.rel = 'noopener noreferrer';
+            openLink.textContent = 'Open';
+            candidateActions.appendChild(openLink);
+
+            candidate.appendChild(candidateActions);
+
+            const urlText = document.createElement('div');
+            urlText.classList.add('image-candidate-url-text');
+            urlText.textContent = url;
+            candidate.appendChild(urlText);
+
+            grid.appendChild(candidate);
+        });
+
+        container.appendChild(grid);
+    }
+
+    return container;
 }
 
 function renderImageQueue() {
@@ -2851,6 +2998,8 @@ function renderImageQueue() {
         query.classList.add('image-queue-card-meta');
         query.textContent = `Future query: ${buildImageSearchQuery(record)}`;
         details.appendChild(query);
+
+        details.appendChild(renderImageCandidateReview(record));
 
         card.appendChild(details);
 
@@ -2998,6 +3147,15 @@ function renderImageQueryPreview() {
         query.classList.add('image-query-text');
         query.textContent = buildImageSearchQuery(record);
         item.appendChild(query);
+
+        if (record.selectedImageCandidateUrl || record.imageCandidatesRejected) {
+            const imageStatus = document.createElement('div');
+            imageStatus.classList.add('image-query-selected-candidate');
+            imageStatus.textContent = record.selectedImageCandidateUrl
+                ? `Selected candidate: ${record.selectedImageCandidateUrl}`
+                : 'Candidates rejected for this queue session.';
+            item.appendChild(imageStatus);
+        }
 
         list.appendChild(item);
     });

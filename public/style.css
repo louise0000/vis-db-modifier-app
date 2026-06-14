@@ -1121,3 +1121,110 @@ nav ul li a:hover {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     font-size: 12px;
 }
+
+/* Manual image candidate review inside image queue */
+.image-candidate-review {
+    margin-top: 10px;
+    padding: 10px;
+    background: #ffffff66;
+    border: 1px dashed #00000022;
+    border-radius: 8px;
+}
+
+.image-candidate-heading {
+    font-weight: bold;
+    margin-bottom: 4px;
+}
+
+.image-candidate-help-text,
+.image-candidate-status,
+.image-query-selected-candidate {
+    margin: 6px 0;
+    font-size: 12px;
+    opacity: 0.82;
+}
+
+.image-candidate-url-input {
+    width: 100%;
+    min-height: 5.5em;
+    margin: 6px 0;
+    padding: 7px;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 12px;
+}
+
+.image-candidate-actions {
+    margin: 4px 0 8px 0;
+}
+
+.image-candidate-actions button,
+.image-candidate-card-actions button {
+    margin: 4px 6px 4px 0;
+    padding: 6px 10px;
+    font-size: 12px;
+    background-color: #333;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.image-candidate-actions button:hover,
+.image-candidate-card-actions button:hover {
+    background-color: #333;
+    opacity: 0.78;
+}
+
+.image-candidate-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.image-candidate-card {
+    padding: 8px;
+    background: #ffffffaa;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+}
+
+.image-candidate-card.selected {
+    border: 2px solid #333;
+    background: #f6ff92aa;
+}
+
+.image-candidate-preview-image {
+    width: 100%;
+    height: 120px;
+    object-fit: cover;
+    background: #00000011;
+    border: 1px solid #00000022;
+    border-radius: 6px;
+}
+
+.image-candidate-broken .image-candidate-preview-image {
+    opacity: 0.32;
+}
+
+.image-candidate-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.image-candidate-card-actions a {
+    font-size: 12px;
+    color: #333;
+    text-decoration: underline;
+}
+
+.image-candidate-url-text {
+    margin-top: 6px;
+    font-size: 10px;
+    opacity: 0.72;
+    overflow-wrap: anywhere;
+}
