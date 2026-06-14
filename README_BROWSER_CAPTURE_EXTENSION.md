@@ -1,104 +1,66 @@
-# Modifier Draft Capture browser extension
+# Modifier Draft Capture extension
 
-This is a deliberately small local-only WebExtension prototype.
+This is a small local browser-extension prototype for sending draft records to the modifier app.
 
-It captures the current page as a draft-record object and POSTs it to the modifier app's local receiver:
-
-```text
-POST http://localhost:3000/api/draft-capture
-```
-
-The modifier app port is currently assumed to be `3000`.
-
-## Important Firefox development behaviour
-
-When this extension is loaded through `about:debugging`, it is a **temporary extension**. Firefox removes temporary extensions when Firefox restarts. This is normal and does not mean the project is broken.
-
-For development, reload it from:
+It is intentionally not a Zotero clone. It captures a page into the same draft-record shape used by the modifier app:
 
 ```text
-about:debugging#/runtime/this-firefox
+web page -> extension popup -> POST http://localhost:3000/api/draft-capture -> Load Latest Browser Capture
 ```
 
-Then choose **Load Temporary Add-on** and select:
+## Development install in Firefox
 
-```text
-browser-capture-extension/manifest.json
-```
+Temporary Firefox extensions disappear when Firefox restarts.
 
-## Pinning it to the visible toolbar
+To reload manually:
 
-Firefox may keep the extension under the jigsaw/extensions button.
+1. Type `about:debugging#/runtime/this-firefox` in the Firefox address bar.
+2. Click **Load Temporary Add-on…**.
+3. Choose `browser-capture-extension/manifest.json`.
+4. Use the jigsaw/extensions menu if the button is not pinned to the toolbar.
 
-Try:
+## Modifier app
 
-1. Click the jigsaw/extensions button.
-2. Right-click **Modifier Draft Capture**.
-3. Choose **Pin to Toolbar** if the option appears.
-
-If Firefox does not offer the option for a temporary add-on, continue using it from the jigsaw menu during development. The icon files are included so a signed/permanent build will have a recognisable toolbar/menu icon later.
-
-## Faster development workflow with web-ext
-
-This patch adds a small `package.json` inside `browser-capture-extension/`.
-
-From the project root:
-
-```bash
-cd browser-capture-extension
-npm install
-npm run firefox
-```
-
-This launches Firefox with the extension loaded. It is still a development workflow, not a properly signed permanent install, but it avoids manually navigating through `about:debugging` every time.
-
-To lint:
-
-```bash
-npm run lint
-```
-
-To build an unsigned development package:
-
-```bash
-npm run build
-```
-
-## Permanent install later
-
-For normal Firefox release builds, extensions generally need to be signed before they can be installed permanently. Keep using temporary install or `web-ext` while developing. Later, package/signing can be treated as a separate release step.
-
-## Test capture
-
-1. Make sure the modifier app is running:
+Start the modifier app first:
 
 ```bash
 node server.js
 ```
 
-2. Open a Wikipedia biography page.
-3. Open **Modifier Draft Capture**.
-4. Leave record type as `Auto`, or choose `theorist`.
-5. Click **Capture Current Page**.
-6. Go back to the modifier app.
-7. Click **Load Latest Browser Capture** in Add Single Record.
+The extension defaults to port `3000`.
 
-## What this version does
+## Current capture behaviour
 
-- Extracts page title and URL.
-- Extracts the first useful paragraph.
-- Detects Wikipedia pages.
-- Guesses `theorist` for Wikipedia pages and `artworkBook` for generic pages when type is set to `Auto`.
-- Extracts a candidate image URL.
-- Tries to parse birth/death years from biography-like first paragraphs and infobox text.
-- On Wikipedia pages, looks for a Japanese Wikipedia language link and maps that page title into `label_jp`.
-- Sends a draft-record object to the local modifier app.
+### Wikipedia biography pages
 
-## What this version does not do yet
+The extension attempts to capture:
 
-- It does not use Zotero translators.
-- It does not use Wikidata API lookups.
-- It does not scrape every website intelligently.
-- It does not save anything directly to Mongo.
-- It does not make external image URLs canonical.
-- It does not bypass the modifier app review step.
+- English page title
+- Japanese Wikipedia page title into `label_jp`, where available
+- first useful paragraph into `note`
+- birth and death years
+- Wikidata QID
+- image candidates
+- canonical/source URLs
+
+### Generic pages
+
+The extension now also harvests common page metadata:
+
+- OpenGraph and Twitter Card title/description/image
+- schema.org JSON-LD entities such as `Person`, `Book`, `Article`, `ScholarlyArticle`, `Movie`, and `CreativeWork`
+- citation metadata such as `citation_title`, `citation_author`, `citation_publication_date`, `citation_doi`, `citation_isbn`, and `citation_pdf_url`
+- a first useful paragraph fallback
+
+If the page appears to describe a person, Auto mode proposes `theorist`.
+Otherwise Auto mode proposes `artworkBook`.
+
+## Image handling note
+
+The extension does not solve image preservation. It sends the first image candidate to `proposedInfo.imgURL` for continuity with the current app, but it also preserves a fuller list in:
+
+```js
+sourceMeta.raw.imageCandidates
+```
+
+Those candidates should later feed a separate image-review/upload workflow before a stable canonical image URL is written back to `info.imgURL`.

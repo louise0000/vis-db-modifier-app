@@ -45,6 +45,120 @@ function executeScript(api, details) {
 }
 
 function extractDraftFromCurrentPage(requestedType) {
+  function cleanText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function firstNonEmpty(...values) {
+    return values.map(cleanText).find(Boolean) || '';
+  }
+
+  function contentFromSelector(selector, attr = 'content') {
+    const el = document.querySelector(selector);
+    return cleanText(el?.getAttribute(attr) || el?.content || el?.textContent || '');
+  }
+
+  function metaByNames(names) {
+    for (const name of names) {
+      const escaped = String(name).replace(/"/g, '\\"');
+      const value = contentFromSelector(`meta[name="${escaped}"], meta[itemprop="${escaped}"]`);
+      if (value) return value;
+    }
+    return '';
+  }
+
+  function metaByProperties(properties) {
+    for (const property of properties) {
+      const escaped = String(property).replace(/"/g, '\\"');
+      const value = contentFromSelector(`meta[property="${escaped}"], meta[name="${escaped}"]`);
+      if (value) return value;
+    }
+    return '';
+  }
+
+  function valuesFromSelectors(selectors, attr = 'content') {
+    return selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))
+      .map(el => cleanText(el.getAttribute(attr) || el.content || el.currentSrc || el.src || el.href || el.textContent || ''))
+      .filter(Boolean);
+  }
+
+  function toArray(value) {
+    if (!value) return [];
+    return Array.isArray(value) ? value : [value];
+  }
+
+  function normaliseSchemaType(typeValue) {
+    return toArray(typeValue).map(type => String(type || '').replace(/^https?:\/\/schema\.org\//i, '').trim()).filter(Boolean);
+  }
+
+  function parseJsonLdDocuments() {
+    const blocks = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+    const parsed = [];
+
+    for (const block of blocks) {
+      try {
+        const raw = block.textContent || '';
+        if (!raw.trim()) continue;
+        parsed.push(JSON.parse(raw));
+      } catch (err) {
+        // Some sites include invalid JSON-LD; ignore and preserve graceful capture.
+      }
+    }
+
+    return parsed;
+  }
+
+  function flattenJsonLd(input, output = []) {
+    if (!input) return output;
+    if (Array.isArray(input)) {
+      input.forEach(item => flattenJsonLd(item, output));
+      return output;
+    }
+    if (typeof input !== 'object') return output;
+
+    output.push(input);
+    if (input['@graph']) flattenJsonLd(input['@graph'], output);
+    if (input.mainEntity) flattenJsonLd(input.mainEntity, output);
+    if (input.about) flattenJsonLd(input.about, output);
+    return output;
+  }
+
+  function findSchemaEntity(entities, preferredTypes) {
+    const lowerPreferred = preferredTypes.map(type => type.toLowerCase());
+    return entities.find(entity => {
+      const types = normaliseSchemaType(entity['@type']).map(type => type.toLowerCase());
+      return types.some(type => lowerPreferred.includes(type));
+    }) || null;
+  }
+
+  function stringFromSchemaValue(value) {
+    if (!value) return '';
+    if (typeof value === 'string' || typeof value === 'number') return cleanText(value);
+    if (Array.isArray(value)) return firstNonEmpty(...value.map(stringFromSchemaValue));
+    if (typeof value === 'object') {
+      return firstNonEmpty(value.name, value.headline, value.title, value.url, value['@id']);
+    }
+    return '';
+  }
+
+  function stringsFromSchemaValue(value) {
+    return toArray(value).map(stringFromSchemaValue).filter(Boolean);
+  }
+
+  function urlsFromSchemaImages(value) {
+    const urls = [];
+    for (const item of toArray(value)) {
+      if (!item) continue;
+      if (typeof item === 'string') urls.push(item);
+      else if (typeof item === 'object') {
+        if (item.url) urls.push(item.url);
+        if (item.contentUrl) urls.push(item.contentUrl);
+        if (item.thumbnailUrl) urls.push(item.thumbnailUrl);
+      }
+    }
+    return urls.map(cleanText).filter(Boolean);
+  }
+
   function firstUsefulParagraphFromDocument() {
     const selectors = [
       '#mw-content-text .mw-parser-output > p',
@@ -55,7 +169,7 @@ function extractDraftFromCurrentPage(requestedType) {
 
     for (const selector of selectors) {
       const paragraph = Array.from(document.querySelectorAll(selector))
-        .map(p => (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim())
+        .map(p => cleanText(p.innerText || p.textContent || ''))
         .find(text => text.length > 80);
 
       if (paragraph) return paragraph;
@@ -64,22 +178,53 @@ function extractDraftFromCurrentPage(requestedType) {
     return '';
   }
 
-  function imageFromDocument() {
+  function addImageCandidate(candidates, url, source, extra = {}) {
+    const cleanUrl = cleanText(url);
+    if (!cleanUrl || candidates.some(candidate => candidate.url === cleanUrl)) return;
+    candidates.push({
+      url: cleanUrl,
+      source,
+      alt: cleanText(extra.alt),
+      width: extra.width || '',
+      height: extra.height || ''
+    });
+  }
+
+  function imageCandidatesFromDocument(schemaEntities) {
+    const candidates = [];
+
     const infoboxImage = document.querySelector('.infobox img');
-    if (infoboxImage?.src) return infoboxImage.src;
+    if (infoboxImage) {
+      addImageCandidate(candidates, infoboxImage.currentSrc || infoboxImage.src, 'wikipedia-infobox', {
+        alt: infoboxImage.alt,
+        width: infoboxImage.naturalWidth || infoboxImage.width || '',
+        height: infoboxImage.naturalHeight || infoboxImage.height || ''
+      });
+    }
 
-    const ogImage = document.querySelector('meta[property="og:image"]');
-    if (ogImage?.content) return ogImage.content;
+    valuesFromSelectors(['meta[property="og:image"]', 'meta[property="og:image:secure_url"]', 'meta[name="twitter:image"]'])
+      .forEach(url => addImageCandidate(candidates, url, 'page-meta-image'));
 
-    const firstArticleImage = document.querySelector('article img, main img, img');
-    if (firstArticleImage?.src) return firstArticleImage.src;
+    valuesFromSelectors(['link[rel="image_src"]'], 'href')
+      .forEach(url => addImageCandidate(candidates, url, 'image-src-link'));
 
-    return '';
+    schemaEntities.flatMap(entity => urlsFromSchemaImages(entity.image || entity.thumbnailUrl || entity.primaryImageOfPage))
+      .forEach(url => addImageCandidate(candidates, url, 'schema-image'));
+
+    Array.from(document.querySelectorAll('article img, main img')).slice(0, 6).forEach(img => {
+      addImageCandidate(candidates, img.currentSrc || img.src, 'article-image', {
+        alt: img.alt,
+        width: img.naturalWidth || img.width || '',
+        height: img.naturalHeight || img.height || ''
+      });
+    });
+
+    return candidates;
   }
 
   function cleanPageTitleFromDocument(rawTitle, isWikipedia) {
-    const title = (rawTitle || '').replace(/\s+/g, ' ').trim();
-    if (!isWikipedia) return title;
+    const title = cleanText(rawTitle);
+    if (!isWikipedia) return title.replace(/\s*[|—-]\s*.+$/, '').trim() || title;
     return title.replace(/\s*-\s*Wikipedia\s*$/i, '').trim();
   }
 
@@ -97,7 +242,7 @@ function extractDraftFromCurrentPage(requestedType) {
   function infoboxRowYear(labelPattern) {
     const rows = Array.from(document.querySelectorAll('.infobox tr'));
     for (const row of rows) {
-      const header = (row.querySelector('th')?.textContent || '').replace(/\s+/g, ' ').trim();
+      const header = cleanText(row.querySelector('th')?.textContent || '');
       if (!labelPattern.test(header)) continue;
       const years = yearsFromText(row.textContent || '');
       if (years.length) return years[0];
@@ -106,7 +251,7 @@ function extractDraftFromCurrentPage(requestedType) {
   }
 
   function yearsFromLifespanText(text) {
-    const source = String(text || '').replace(/\s+/g, ' ');
+    const source = cleanText(text);
     const parentheticals = Array.from(source.matchAll(/\(([^)]*[–—-][^)]*)\)/g)).map(match => match[1]);
     for (const segment of parentheticals) {
       const years = yearsFromText(segment);
@@ -176,16 +321,73 @@ function extractDraftFromCurrentPage(requestedType) {
     };
   }
 
+  function extractGenericMetadata(schemaEntities) {
+    const webPageEntity = findSchemaEntity(schemaEntities, ['WebPage', 'ProfilePage', 'Article', 'NewsArticle', 'ScholarlyArticle', 'BlogPosting', 'Book', 'Movie', 'CreativeWork']) || schemaEntities[0] || {};
+    const personEntity = findSchemaEntity(schemaEntities, ['Person']);
+    const bookEntity = findSchemaEntity(schemaEntities, ['Book']);
+    const articleEntity = findSchemaEntity(schemaEntities, ['ScholarlyArticle', 'Article', 'NewsArticle', 'BlogPosting']);
+    const movieEntity = findSchemaEntity(schemaEntities, ['Movie']);
+    const creativeEntity = bookEntity || articleEntity || movieEntity || webPageEntity;
+
+    const schemaTypes = schemaEntities.flatMap(entity => normaliseSchemaType(entity['@type']));
+    const citationAuthors = valuesFromSelectors(['meta[name="citation_author"]']);
+    const schemaAuthors = stringsFromSchemaValue(creativeEntity.author || creativeEntity.creator || webPageEntity.author);
+    const schemaPublishers = stringsFromSchemaValue(creativeEntity.publisher || webPageEntity.publisher);
+
+    const citationTitle = metaByNames(['citation_title']);
+    const citationDate = metaByNames(['citation_publication_date', 'citation_date', 'citation_online_date']);
+    const schemaDate = stringFromSchemaValue(creativeEntity.datePublished || creativeEntity.dateCreated || creativeEntity.dateModified || webPageEntity.datePublished);
+    const dateYear = yearsFromText(firstNonEmpty(citationDate, schemaDate, metaByProperties(['article:published_time'])))[0] || '';
+
+    const metadataTitle = firstNonEmpty(
+      personEntity?.name,
+      creativeEntity?.name,
+      creativeEntity?.headline,
+      webPageEntity?.name,
+      webPageEntity?.headline,
+      citationTitle,
+      metaByProperties(['og:title', 'twitter:title'])
+    );
+
+    const description = firstNonEmpty(
+      creativeEntity?.description,
+      webPageEntity?.description,
+      metaByNames(['citation_abstract', 'description', 'twitter:description']),
+      metaByProperties(['og:description'])
+    );
+
+    return {
+      schemaTypes,
+      metadataTitle,
+      description,
+      dateYear,
+      authors: citationAuthors.length ? citationAuthors : schemaAuthors,
+      publisher: firstNonEmpty(...schemaPublishers, metaByNames(['citation_publisher'])),
+      publicationTitle: firstNonEmpty(metaByNames(['citation_journal_title', 'citation_conference_title', 'citation_book_title']), stringFromSchemaValue(creativeEntity.isPartOf)),
+      doi: metaByNames(['citation_doi']),
+      isbn: firstNonEmpty(metaByNames(['citation_isbn']), stringFromSchemaValue(bookEntity?.isbn)),
+      pdfUrl: metaByNames(['citation_pdf_url']),
+      contentKind: personEntity ? 'person' : bookEntity ? 'book' : articleEntity ? 'article' : movieEntity ? 'movie' : ''
+    };
+  }
+
   const hostname = window.location.hostname;
   const isWikipedia = /(^|\.)wikipedia\.org$/i.test(hostname);
-  const title = cleanPageTitleFromDocument(document.title, isWikipedia);
   const canonicalUrl = document.querySelector('link[rel="canonical"]')?.href || window.location.href;
   const firstParagraph = firstUsefulParagraphFromDocument();
-  const imgURL = imageFromDocument();
-  const years = parseYearsFromDocument(firstParagraph);
+  const jsonLdDocuments = parseJsonLdDocuments();
+  const schemaEntities = flattenJsonLd(jsonLdDocuments);
+  const genericMetadata = extractGenericMetadata(schemaEntities);
+  const imageCandidates = imageCandidatesFromDocument(schemaEntities);
+  const imgURL = imageCandidates[0]?.url || '';
+
+  const title = cleanPageTitleFromDocument(firstNonEmpty(genericMetadata.metadataTitle, document.title), isWikipedia);
+  const description = firstNonEmpty(genericMetadata.description, firstParagraph);
+  const years = parseYearsFromDocument(firstNonEmpty(firstParagraph, description));
   const wikidataQID = extractWikidataIdFromDocument();
   const japaneseWikipedia = isWikipedia ? extractJapaneseWikipediaInfoFromDocument() : { title: '', url: '' };
-  const inferredType = isWikipedia ? 'theorist' : 'artworkBook';
+
+  const inferredType = isWikipedia || genericMetadata.contentKind === 'person' ? 'theorist' : 'artworkBook';
   const proposedType = requestedType === 'auto' ? inferredType : requestedType;
   const capturedAt = new Date().toISOString();
 
@@ -193,7 +395,7 @@ function extractDraftFromCurrentPage(requestedType) {
     label: title,
     label_jp: japaneseWikipedia.title || '',
     type: proposedType,
-    note: firstParagraph,
+    note: description,
     note_jp: '',
     imgURL
   };
@@ -204,15 +406,15 @@ function extractDraftFromCurrentPage(requestedType) {
   }
 
   if (proposedType === 'artworkBook') {
-    proposedInfo.date = '';
-    proposedInfo.article = '';
+    proposedInfo.date = genericMetadata.dateYear || '';
+    proposedInfo.article = firstParagraph && firstParagraph !== description ? firstParagraph : '';
   }
 
   return {
     proposedType,
     proposedInfo,
     sourceMeta: {
-      source: isWikipedia ? 'browser-wikipedia-page' : 'browser-generic-page',
+      source: isWikipedia ? 'browser-wikipedia-page' : (genericMetadata.contentKind ? 'browser-metadata-page' : 'browser-generic-page'),
       capturedAt,
       raw: {
         title,
@@ -223,10 +425,21 @@ function extractDraftFromCurrentPage(requestedType) {
         isWikipedia,
         requestedType,
         inferredType,
+        inferredContentKind: genericMetadata.contentKind,
         firstParagraph,
+        description,
         imgURL,
+        imageCandidates,
         birth: years.birth,
         death: years.death,
+        dateYear: genericMetadata.dateYear,
+        authors: genericMetadata.authors,
+        publisher: genericMetadata.publisher,
+        publicationTitle: genericMetadata.publicationTitle,
+        doi: genericMetadata.doi,
+        isbn: genericMetadata.isbn,
+        pdfUrl: genericMetadata.pdfUrl,
+        schemaTypes: genericMetadata.schemaTypes,
         wikidataQID,
         japaneseWikipediaTitle: japaneseWikipedia.title,
         japaneseWikipediaUrl: japaneseWikipedia.url
@@ -272,7 +485,9 @@ async function captureCurrentPage() {
     throw new Error(payload.error || payload.message || `Modifier app returned ${response.status}.`);
   }
 
-  setStatus('Captured. Return to the modifier app and click “Load Latest Browser Capture”.', 'ok');
+  const raw = draftRecord.sourceMeta?.raw || {};
+  const detail = raw.inferredContentKind ? ` (${raw.inferredContentKind})` : '';
+  setStatus(`Captured${detail}. Return to the modifier app and click “Load Latest Browser Capture”.`, 'ok');
 }
 
 captureButton.addEventListener('click', async () => {
