@@ -96,8 +96,9 @@ function appendFormField(container, key, value) {
 
 
 // Draft-record bridge for future capture/import workflows.
-// This does not persist sourceMeta yet; it only proves that incoming data can
-// prefill the existing Add Single Record form for human review before saving.
+// Incoming data can prefill the existing Add Single Record form for human review.
+// If the user saves the draft, source metadata is preserved at root-level sourceMeta,
+// not mixed into info.
 const testDraftRecord = {
     proposedType: 'artworkBook',
     proposedInfo: {
@@ -121,11 +122,15 @@ const testDraftRecord = {
     duplicateWarnings: []
 };
 
+let currentDraftRecord = null;
+let currentDraftSourceFieldMapping = { mappedFields: {}, unmappedFields: {} };
 let currentDraftDuplicateCandidates = [];
 let currentDraftDuplicateReviewAcknowledged = false;
 
 
 function clearDraftSourceMetadata() {
+    currentDraftRecord = null;
+    currentDraftSourceFieldMapping = { mappedFields: {}, unmappedFields: {} };
     currentDraftDuplicateCandidates = [];
     currentDraftDuplicateReviewAcknowledged = false;
     const panel = document.getElementById('draft-source-metadata');
@@ -306,8 +311,16 @@ function renderDraftSourceMetadata(draftRecord = {}, templateRecord = {}) {
         ? draftRecord.duplicateWarnings
         : [];
     const { mappedFields, unmappedFields } = getSourceFieldMapping(draftRecord, templateRecord);
+    const rawFields = sourceMeta.raw && typeof sourceMeta.raw === 'object' ? sourceMeta.raw : {};
+    const hasSourceSummary = Boolean(sourceMeta.source || sourceMeta.capturedAt);
+    const hasSourceMetadata = hasSourceSummary || Object.keys(rawFields).length > 0;
 
-    if (!Object.keys(mappedFields).length && !Object.keys(unmappedFields).length && !duplicateWarnings.length) {
+    // Keep the active draft available until submit so its provenance can be
+    // attached to the new root-level record as sourceMeta.
+    currentDraftRecord = draftRecord;
+    currentDraftSourceFieldMapping = { mappedFields, unmappedFields };
+
+    if (!Object.keys(mappedFields).length && !Object.keys(unmappedFields).length && !duplicateWarnings.length && !hasSourceMetadata) {
         clearDraftSourceMetadata();
         return;
     }
@@ -320,7 +333,7 @@ function renderDraftSourceMetadata(draftRecord = {}, templateRecord = {}) {
 
     const help = document.createElement('p');
     help.classList.add('draft-source-help-text');
-    help.textContent = 'Mapped fields have been prefilled into the editable form. Unmapped fields are shown for review only and are not saved by this test bridge.';
+    help.textContent = 'Mapped fields have been prefilled into the editable form. Unmapped fields are preserved as root-level sourceMeta if this draft is saved, but they are not mixed into info.';
     panel.appendChild(help);
 
     if (sourceMeta.source || sourceMeta.capturedAt) {
@@ -375,6 +388,32 @@ function createDraftTemplateRecord(templateRecord = {}, draftRecord = {}) {
         })
     };
 }
+
+function createPersistableDraftSourceMeta(draftRecord = {}, savedInfo = {}) {
+    if (!draftRecord?.sourceMeta) return null;
+
+    const sourceMeta = draftRecord.sourceMeta || {};
+    const raw = sourceMeta.raw && typeof sourceMeta.raw === 'object' ? sourceMeta.raw : {};
+    const hasRaw = Object.keys(raw).length > 0;
+    const hasMapped = Object.keys(currentDraftSourceFieldMapping.mappedFields || {}).length > 0;
+    const hasUnmapped = Object.keys(currentDraftSourceFieldMapping.unmappedFields || {}).length > 0;
+
+    if (!sourceMeta.source && !sourceMeta.capturedAt && !hasRaw && !hasMapped && !hasUnmapped) {
+        return null;
+    }
+
+    return {
+        source: sourceMeta.source || 'unknown-draft-source',
+        capturedAt: sourceMeta.capturedAt || '',
+        acceptedAt: new Date().toISOString(),
+        proposedType: draftRecord.proposedType || draftRecord.proposedInfo?.type || savedInfo.type || '',
+        mappedFields: currentDraftSourceFieldMapping.mappedFields || {},
+        unmappedFields: currentDraftSourceFieldMapping.unmappedFields || {},
+        raw,
+        note: 'Captured through modifier draft-record prefill bridge. Mapped fields were saved into info; unmapped fields are preserved here for provenance/review.'
+    };
+}
+
 
 async function loadDraftRecordIntoAddForm(draftRecord) {
     const typeSelect = document.getElementById('type-select');
@@ -1195,6 +1234,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         newRecord.info = ensureJapaneseNoteField(info);
+
+        const persistableSourceMeta = createPersistableDraftSourceMeta(currentDraftRecord, newRecord.info);
+        if (persistableSourceMeta) {
+            newRecord.sourceMeta = persistableSourceMeta;
+        }
 
         if (currentDraftDuplicateCandidates.length && !currentDraftDuplicateReviewAcknowledged) {
             const shouldContinue = confirm(
