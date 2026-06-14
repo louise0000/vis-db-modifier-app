@@ -888,3 +888,31 @@ nav ul li a:hover {
 .draft-json-actions button:hover {
     background-color: #555;
 }
+
+
+/* Read-only source metadata in Search/Edit */
+.edit-source-metadata {
+    width: 75vw;
+    margin: 12px 0 20px 0;
+    padding: 12px;
+    background: #ffffff99;
+    border: 1px dashed #00000033;
+    border-radius: 8px;
+}
+
+.edit-source-metadata h4 {
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.edit-source-metadata h5 {
+    margin-top: 12px;
+    margin-bottom: 6px;
+    font-weight: bold;
+}
+
+.draft-source-raw-captured-list {
+    background: #ffffff66;
+    padding: 8px;
+    border-radius: 6px;
+}

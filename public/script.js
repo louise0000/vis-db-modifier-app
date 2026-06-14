@@ -238,6 +238,53 @@ function appendDraftMetadataList(panel, headingText, fields, className) {
     panel.appendChild(rawList);
 }
 
+function objectHasDisplayableFields(value) {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length);
+}
+
+function renderRootSourceMetaPanel(container, sourceMeta = {}) {
+    if (!objectHasDisplayableFields(sourceMeta)) return;
+
+    const panel = document.createElement('div');
+    panel.classList.add('edit-source-metadata');
+
+    const heading = document.createElement('h4');
+    heading.textContent = 'Saved Source Metadata';
+    panel.appendChild(heading);
+
+    const help = document.createElement('p');
+    help.classList.add('draft-source-help-text');
+    help.textContent = 'Read-only provenance saved at the record root. These fields are not part of editable info, so ordinary edits will not overwrite them.';
+    panel.appendChild(help);
+
+    const summaryFields = {};
+    ['source', 'capturedAt', 'acceptedAt', 'proposedType', 'note'].forEach(key => {
+        if (sourceMeta[key]) summaryFields[key] = sourceMeta[key];
+    });
+
+    appendDraftMetadataList(panel, 'Source summary', summaryFields, 'draft-source-mapped-list');
+    appendDraftMetadataList(panel, 'Mapped fields saved into info', sourceMeta.mappedFields || {}, 'draft-source-mapped-list');
+    appendDraftMetadataList(panel, 'Unmapped fields preserved only in sourceMeta', sourceMeta.unmappedFields || {}, 'draft-source-unmapped-list');
+    appendDraftMetadataList(panel, 'Raw captured data', sourceMeta.raw || {}, 'draft-source-raw-captured-list');
+
+    container.appendChild(panel);
+}
+
+async function fetchFullRecordForEdit(recordSummary = {}) {
+    const id = recordSummary.id || recordSummary.info?.id;
+    if (!id) return recordSummary;
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/${encodeURIComponent(id)}`);
+        const fullRecord = await response.json();
+        if (!response.ok) throw new Error(fullRecord.error || 'Could not fetch full record.');
+        return fullRecord;
+    } catch (error) {
+        console.warn('Using search-result summary because full edit record fetch failed:', error);
+        return recordSummary;
+    }
+}
+
 
 function getDraftProposedLabel(draftRecord = {}) {
     return (draftRecord.proposedInfo?.label || draftRecord.sourceMeta?.raw?.title || '').trim();
@@ -1040,7 +1087,9 @@ async function handleEditRecord(data) {
     const editRecord = document.getElementById('edit-record');
     editRecord.innerHTML = ''; // Clear previous content
 
-    const originalInfo = data.info || {};
+    const fullRecord = await fetchFullRecordForEdit(data);
+    const recordId = fullRecord.id || data.id || fullRecord.info?.id;
+    const originalInfo = fullRecord.info || data.info || {};
     const ulElement = document.createElement('ul');
 
     for (const [key, value] of getInfoEntriesWithJapaneseNote(originalInfo)) {
@@ -1063,12 +1112,13 @@ async function handleEditRecord(data) {
     }
 
     editRecord.appendChild(ulElement);
+    renderRootSourceMetaPanel(editRecord, fullRecord.sourceMeta);
     editSection.style.display = 'block';
 
     const saveButton = document.getElementById('save-edits');
     saveButton.style.display = 'block';
     saveButton.onclick = async () => {
-        console.log("Save Changes clicked for record ID:", data.id);
+        console.log("Save Changes clicked for record ID:", recordId);
         const updatedInfo = {};
         ulElement.querySelectorAll('li').forEach(li => {
             const key = li.querySelector('strong').textContent.replace(':', '');
@@ -1076,7 +1126,7 @@ async function handleEditRecord(data) {
             updatedInfo[key] = parseEditedInfoValue(value, originalInfo[key]);
         });
 
-        const response = await fetch(`${window.location.protocol}//${window.location.host}/api/reference/update/${data.id}`, {
+        const response = await fetch(`${window.location.protocol}//${window.location.host}/api/reference/update/${recordId}`, {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
