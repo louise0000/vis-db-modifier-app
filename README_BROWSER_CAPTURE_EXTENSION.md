@@ -1,66 +1,41 @@
-# Modifier Draft Capture extension
+# Modifier Draft Capture Extension
 
-This is a small local browser-extension prototype for sending draft records to the modifier app.
+Development extension for sending draft records from the active browser page to the local modifier app.
 
-It is intentionally not a Zotero clone. It captures a page into the same draft-record shape used by the modifier app:
+## Current local target
+
+The extension posts to:
 
 ```text
-web page -> extension popup -> POST http://localhost:3000/api/draft-capture -> Load Latest Browser Capture
+http://localhost:3000/api/draft-capture
 ```
 
-## Development install in Firefox
-
-Temporary Firefox extensions disappear when Firefox restarts.
-
-To reload manually:
-
-1. Type `about:debugging#/runtime/this-firefox` in the Firefox address bar.
-2. Click **Load Temporary Add-on…**.
-3. Choose `browser-capture-extension/manifest.json`.
-4. Use the jigsaw/extensions menu if the button is not pinned to the toolbar.
-
-## Modifier app
-
-Start the modifier app first:
-
-```bash
-node server.js
-```
-
-The extension defaults to port `3000`.
+The modifier app then loads the received draft via **Add Single Record → Load Latest Browser Capture**.
 
 ## Current capture behaviour
 
-### Wikipedia biography pages
+The extension has three layers:
 
-The extension attempts to capture:
+1. **Wikipedia biography capture**
+   - English label
+   - Japanese Wikipedia title as `label_jp` when a Japanese language page is linked
+   - birth/death year where detectable
+   - Wikidata QID where detectable
 
-- English page title
-- Japanese Wikipedia page title into `label_jp`, where available
-- first useful paragraph into `note`
-- birth and death years
-- Wikidata QID
-- image candidates
-- canonical/source URLs
+2. **Site-specific cleanup layer**
+   - IMDb title pages: prefer the displayed primary title and year from the document title/hero area rather than localised release dates.
+   - Amazon product pages: prefer `#productTitle`, byline author, ISBN, publisher and publication-date details; suppress SEO/returns text from note/article.
+   - Goodreads and Google Books: attempt title, author, published year and cleaner description when available.
 
-### Generic pages
+3. **Generic metadata fallback**
+   - OpenGraph / Twitter Card metadata
+   - schema.org JSON-LD metadata
+   - citation metadata
+   - first useful paragraph fallback
+   - image candidates preserved in `sourceMeta.raw.imageCandidates`
 
-The extension now also harvests common page metadata:
+## Important limitation
 
-- OpenGraph and Twitter Card title/description/image
-- schema.org JSON-LD entities such as `Person`, `Book`, `Article`, `ScholarlyArticle`, `Movie`, and `CreativeWork`
-- citation metadata such as `citation_title`, `citation_author`, `citation_publication_date`, `citation_doi`, `citation_isbn`, and `citation_pdf_url`
-- a first useful paragraph fallback
+This is not a Zotero-grade translator ecosystem. It is a small capture bridge into the modifier app. For academic publisher pages, Zotero translators or a Zotero translation-server backend may become useful later.
 
-If the page appears to describe a person, Auto mode proposes `theorist`.
-Otherwise Auto mode proposes `artworkBook`.
-
-## Image handling note
-
-The extension does not solve image preservation. It sends the first image candidate to `proposedInfo.imgURL` for continuity with the current app, but it also preserves a fuller list in:
-
-```js
-sourceMeta.raw.imageCandidates
-```
-
-Those candidates should later feed a separate image-review/upload workflow before a stable canonical image URL is written back to `info.imgURL`.
+Images are still treated as candidates. Do not assume the scraped image URL is canonical or permanent. A later image review/cache/upload workflow should decide which image becomes `info.imgURL`.

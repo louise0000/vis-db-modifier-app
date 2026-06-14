@@ -371,6 +371,232 @@ function extractDraftFromCurrentPage(requestedType) {
     };
   }
 
+  function textFromSelectors(selectors) {
+    for (const selector of selectors) {
+      const value = Array.from(document.querySelectorAll(selector))
+        .map(el => cleanText(el.innerText || el.textContent || el.getAttribute('content') || ''))
+        .find(Boolean);
+      if (value) return value;
+    }
+    return '';
+  }
+
+  function bodyTextSnippet() {
+    return cleanText(document.body?.innerText || '').slice(0, 120000);
+  }
+
+  function yearFromAnyDateText(text) {
+    const years = yearsFromText(text);
+    return years[0] || '';
+  }
+
+  function extractFieldAfterLabel(text, labels) {
+    const lines = String(text || '').split(/\n|\r/).map(cleanText).filter(Boolean);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      for (const label of labels) {
+        const pattern = new RegExp(`^${label}\\s*[:：]?\\s*(.+)$`, 'i');
+        const inlineMatch = line.match(pattern);
+        if (inlineMatch?.[1]) return cleanText(inlineMatch[1]);
+        if (new RegExp(`^${label}$`, 'i').test(line) && lines[index + 1]) return lines[index + 1];
+      }
+    }
+    return '';
+  }
+
+  function cleanAmazonAuthor(rawAuthor) {
+    return cleanText(rawAuthor)
+      .replace(/^by\s+/i, '')
+      .replace(/\s*\(Author\).*$/i, '')
+      .replace(/\s*Visit Amazon's .+? Store.*$/i, '')
+      .replace(/\s+and\s+\d+\s+more.*$/i, '')
+      .trim();
+  }
+
+  function extractAmazonBookMetadata(schemaEntities) {
+    const hostname = window.location.hostname;
+    if (!/(^|\.)amazon\./i.test(hostname)) return null;
+
+    const pageText = document.body?.innerText || '';
+    const compactPageText = cleanText(pageText);
+    const bookEntity = findSchemaEntity(schemaEntities, ['Book']) || {};
+
+    const title = firstNonEmpty(
+      textFromSelectors(['#productTitle', '#ebooksProductTitle', 'h1#title span']),
+      stringFromSchemaValue(bookEntity.name)
+    );
+
+    const author = firstNonEmpty(
+      ...valuesFromSelectors(['.author .a-link-normal', '#bylineInfo .author a', '#bylineInfo a']),
+      cleanAmazonAuthor(textFromSelectors(['#bylineInfo']))
+    );
+
+    const productDetailsText = Array.from(document.querySelectorAll('#detailBullets_feature_div, #productDetailsTable, #detailBulletsWrapper_feature_div, table#productDetails_techSpec_section_1, table#productDetails_detailBullets_sections1'))
+      .map(el => el.innerText || el.textContent || '')
+      .join('\n');
+    const detailsSource = productDetailsText || pageText;
+
+    const publisherLine = extractFieldAfterLabel(detailsSource, ['Publisher']);
+    const publisher = firstNonEmpty(
+      stringFromSchemaValue(bookEntity.publisher),
+      publisherLine.replace(/\s*\([^)]*\)\s*$/, '')
+    );
+
+    const publicationDate = firstNonEmpty(
+      extractFieldAfterLabel(detailsSource, ['Publication date', 'Publication Date']),
+      publisherLine.match(/\(([^)]*(?:1[0-9]{3}|20[0-9]{2})[^)]*)\)/)?.[1] || '',
+      stringFromSchemaValue(bookEntity.datePublished)
+    );
+
+    const isbn13 = firstNonEmpty(
+      extractFieldAfterLabel(detailsSource, ['ISBN-13']),
+      compactPageText.match(/ISBN-13\s*[:‏‎ ]+\s*([0-9\-]{10,})/i)?.[1] || ''
+    ).replace(/[^0-9Xx-]/g, '');
+    const isbn10 = firstNonEmpty(
+      extractFieldAfterLabel(detailsSource, ['ISBN-10']),
+      compactPageText.match(/ISBN-10\s*[:‏‎ ]+\s*([0-9Xx\-]{8,})/i)?.[1] || ''
+    ).replace(/[^0-9Xx-]/g, '');
+
+    const description = textFromSelectors([
+      '#bookDescription_feature_div noscript',
+      '#bookDescription_feature_div',
+      '#productDescription',
+      '#aplus_feature_div p'
+    ]).replace(/^Book Description\s*/i, '').trim();
+
+    return {
+      source: 'browser-amazon-book-page',
+      contentKind: 'book',
+      title,
+      authors: author ? [author] : [],
+      publisher,
+      dateYear: yearFromAnyDateText(publicationDate),
+      isbn: isbn13 || isbn10,
+      description,
+      suppressGenericDescription: true,
+      suppressArticleFallback: true,
+      siteRaw: {
+        amazonTitle: title,
+        amazonAuthor: author,
+        publisherLine,
+        publicationDate,
+        isbn13,
+        isbn10
+      }
+    };
+  }
+
+  function extractImdbMovieMetadata(schemaEntities) {
+    const hostname = window.location.hostname;
+    if (!/(^|\.)imdb\.com$/i.test(hostname) || !/\/title\/tt\d+/i.test(window.location.pathname)) return null;
+
+    const movieEntity = findSchemaEntity(schemaEntities, ['Movie']) || {};
+    const documentTitle = cleanText(document.title || '');
+    const titleFromDocument = cleanText(documentTitle.replace(/\s*-\s*IMDb\s*$/i, '').replace(/\s*\(\d{4}\).*$/, ''));
+    const primaryTitle = firstNonEmpty(
+      textFromSelectors(['[data-testid="hero__primary-text"]', 'h1[data-testid="hero__pageTitle"] span', 'h1']),
+      titleFromDocument,
+      stringFromSchemaValue(movieEntity.name)
+    );
+    const originalTitle = textFromSelectors(['[data-testid="hero__original-title"]']).replace(/^Original title:\s*/i, '');
+
+    const yearFromTitle = documentTitle.match(/\((\d{4})\)/)?.[1] || '';
+    const yearFromHero = textFromSelectors(['[data-testid="hero__pageTitle"] ~ ul a[href*="releaseinfo"]', 'a[href*="releaseinfo"]']).match(/\b(1[0-9]{3}|20[0-9]{2})\b/)?.[1] || '';
+    const yearFromSchema = yearFromAnyDateText(stringFromSchemaValue(movieEntity.datePublished));
+
+    return {
+      source: 'browser-imdb-title-page',
+      contentKind: 'movie',
+      title: primaryTitle,
+      dateYear: yearFromTitle || yearFromHero || yearFromSchema,
+      description: stringFromSchemaValue(movieEntity.description) || metaByProperties(['og:description']),
+      suppressArticleFallback: true,
+      siteRaw: {
+        imdbTitle: primaryTitle,
+        imdbOriginalTitle: originalTitle,
+        imdbDocumentTitle: documentTitle,
+        imdbYearFromDocumentTitle: yearFromTitle,
+        imdbYearFromHero: yearFromHero,
+        imdbYearFromSchema: yearFromSchema
+      }
+    };
+  }
+
+  function extractGoodreadsBookMetadata(schemaEntities) {
+    const hostname = window.location.hostname;
+    if (!/(^|\.)goodreads\.com$/i.test(hostname)) return null;
+
+    const pageText = document.body?.innerText || '';
+    const title = firstNonEmpty(
+      textFromSelectors(['h1[data-testid="bookTitle"]', '#bookTitle', 'h1']),
+      metaByProperties(['og:title'])
+    ).replace(/\s+by\s+.+$/i, '');
+    const author = firstNonEmpty(
+      textFromSelectors(['span.ContributorLink__name', 'a.ContributorLink', '.authorName span', '.authorName']),
+      metaByNames(['author'])
+    );
+    const firstPublished = firstNonEmpty(
+      pageText.match(/First published\s+([^\n]+)/i)?.[1] || '',
+      pageText.match(/Published\s+([^\n]+)/i)?.[1] || ''
+    );
+    const description = textFromSelectors(['[data-testid="description"]', '#description span:last-child', '#description']);
+
+    return {
+      source: 'browser-goodreads-book-page',
+      contentKind: 'book',
+      title,
+      authors: author ? [author] : [],
+      dateYear: yearFromAnyDateText(firstPublished),
+      description,
+      suppressGenericDescription: true,
+      suppressArticleFallback: true,
+      siteRaw: {
+        goodreadsTitle: title,
+        goodreadsAuthor: author,
+        goodreadsPublishedText: firstPublished
+      }
+    };
+  }
+
+  function extractGoogleBooksMetadata(schemaEntities) {
+    const hostname = window.location.hostname;
+    if (!/(^|\.)books\.google\./i.test(hostname)) return null;
+
+    const pageText = document.body?.innerText || '';
+    const title = firstNonEmpty(textFromSelectors(['h1', '#book-title']), metaByProperties(['og:title'])).replace(/\s*-\s*Google Books\s*$/i, '');
+    const author = firstNonEmpty(
+      textFromSelectors(['a[href*="inauthor:"]', '.addmd']),
+      pageText.match(/By\s+([^\n]+)/i)?.[1] || ''
+    );
+    const publisherLine = pageText.match(/(?:Publisher|Published by)\s*[:\n]\s*([^\n]+)/i)?.[1] || '';
+    const description = firstNonEmpty(metaByNames(['description']), textFromSelectors(['#synopsistext', '.bookDescription']));
+
+    return {
+      source: 'browser-google-books-page',
+      contentKind: 'book',
+      title,
+      authors: author ? [cleanText(author.replace(/^By\s+/i, ''))] : [],
+      publisher: publisherLine,
+      dateYear: yearFromAnyDateText(publisherLine || pageText.match(/Published\s+([^\n]+)/i)?.[1] || ''),
+      description,
+      suppressGenericDescription: true,
+      suppressArticleFallback: true,
+      siteRaw: {
+        googleBooksTitle: title,
+        googleBooksAuthor: author,
+        googleBooksPublisherLine: publisherLine
+      }
+    };
+  }
+
+  function extractSiteSpecificMetadata(schemaEntities) {
+    return extractImdbMovieMetadata(schemaEntities)
+      || extractAmazonBookMetadata(schemaEntities)
+      || extractGoodreadsBookMetadata(schemaEntities)
+      || extractGoogleBooksMetadata(schemaEntities)
+      || null;
+  }
+
   const hostname = window.location.hostname;
   const isWikipedia = /(^|\.)wikipedia\.org$/i.test(hostname);
   const canonicalUrl = document.querySelector('link[rel="canonical"]')?.href || window.location.href;
@@ -378,18 +604,27 @@ function extractDraftFromCurrentPage(requestedType) {
   const jsonLdDocuments = parseJsonLdDocuments();
   const schemaEntities = flattenJsonLd(jsonLdDocuments);
   const genericMetadata = extractGenericMetadata(schemaEntities);
+  const siteMetadata = extractSiteSpecificMetadata(schemaEntities);
   const imageCandidates = imageCandidatesFromDocument(schemaEntities);
   const imgURL = imageCandidates[0]?.url || '';
 
-  const title = cleanPageTitleFromDocument(firstNonEmpty(genericMetadata.metadataTitle, document.title), isWikipedia);
-  const description = firstNonEmpty(genericMetadata.description, firstParagraph);
+  const rawTitle = firstNonEmpty(siteMetadata?.title, genericMetadata.metadataTitle, document.title);
+  const title = cleanPageTitleFromDocument(rawTitle, isWikipedia);
+  const description = siteMetadata?.suppressGenericDescription
+    ? cleanText(siteMetadata?.description || '')
+    : firstNonEmpty(siteMetadata?.description, genericMetadata.description, firstParagraph);
   const years = parseYearsFromDocument(firstNonEmpty(firstParagraph, description));
   const wikidataQID = extractWikidataIdFromDocument();
   const japaneseWikipedia = isWikipedia ? extractJapaneseWikipediaInfoFromDocument() : { title: '', url: '' };
 
-  const inferredType = isWikipedia || genericMetadata.contentKind === 'person' ? 'theorist' : 'artworkBook';
+  const contentKind = siteMetadata?.contentKind || genericMetadata.contentKind;
+  const inferredType = isWikipedia || contentKind === 'person' ? 'theorist' : 'artworkBook';
   const proposedType = requestedType === 'auto' ? inferredType : requestedType;
   const capturedAt = new Date().toISOString();
+  const authors = siteMetadata?.authors?.length ? siteMetadata.authors : genericMetadata.authors;
+  const publisher = firstNonEmpty(siteMetadata?.publisher, genericMetadata.publisher);
+  const dateYear = firstNonEmpty(siteMetadata?.dateYear, genericMetadata.dateYear);
+  const isbn = firstNonEmpty(siteMetadata?.isbn, genericMetadata.isbn);
 
   const proposedInfo = {
     label: title,
@@ -406,15 +641,15 @@ function extractDraftFromCurrentPage(requestedType) {
   }
 
   if (proposedType === 'artworkBook') {
-    proposedInfo.date = genericMetadata.dateYear || '';
-    proposedInfo.article = firstParagraph && firstParagraph !== description ? firstParagraph : '';
+    proposedInfo.date = dateYear || '';
+    proposedInfo.article = siteMetadata?.suppressArticleFallback ? '' : (firstParagraph && firstParagraph !== description ? firstParagraph : '');
   }
 
   return {
     proposedType,
     proposedInfo,
     sourceMeta: {
-      source: isWikipedia ? 'browser-wikipedia-page' : (genericMetadata.contentKind ? 'browser-metadata-page' : 'browser-generic-page'),
+      source: siteMetadata?.source || (isWikipedia ? 'browser-wikipedia-page' : (contentKind ? 'browser-metadata-page' : 'browser-generic-page')),
       capturedAt,
       raw: {
         title,
@@ -425,21 +660,22 @@ function extractDraftFromCurrentPage(requestedType) {
         isWikipedia,
         requestedType,
         inferredType,
-        inferredContentKind: genericMetadata.contentKind,
+        inferredContentKind: contentKind,
         firstParagraph,
         description,
         imgURL,
         imageCandidates,
         birth: years.birth,
         death: years.death,
-        dateYear: genericMetadata.dateYear,
-        authors: genericMetadata.authors,
-        publisher: genericMetadata.publisher,
-        publicationTitle: genericMetadata.publicationTitle,
-        doi: genericMetadata.doi,
-        isbn: genericMetadata.isbn,
-        pdfUrl: genericMetadata.pdfUrl,
+        dateYear,
+        authors,
+        publisher,
+        publicationTitle: firstNonEmpty(siteMetadata?.publicationTitle, genericMetadata.publicationTitle),
+        doi: firstNonEmpty(siteMetadata?.doi, genericMetadata.doi),
+        isbn,
+        pdfUrl: firstNonEmpty(siteMetadata?.pdfUrl, genericMetadata.pdfUrl),
         schemaTypes: genericMetadata.schemaTypes,
+        siteSpecificData: siteMetadata?.siteRaw || {},
         wikidataQID,
         japaneseWikipediaTitle: japaneseWikipedia.title,
         japaneseWikipediaUrl: japaneseWikipedia.url
