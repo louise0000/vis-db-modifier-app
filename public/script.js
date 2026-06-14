@@ -362,6 +362,60 @@ function getDraftProposedType(draftRecord = {}) {
     return (draftRecord.proposedType || draftRecord.proposedInfo?.type || '').trim();
 }
 
+function stripTrailingDisambiguation(label = '') {
+    let cleanLabel = String(label || '').trim();
+    let previous = '';
+
+    // Wikipedia and IMDb often append disambiguation: Stuart Hall (cultural theorist).
+    // For duplicate warnings, compare both the literal label and the plain base label.
+    while (cleanLabel && cleanLabel !== previous) {
+        previous = cleanLabel;
+        cleanLabel = cleanLabel.replace(/\s*[(（][^()（）]+[)）]\s*$/u, '').trim();
+    }
+
+    return cleanLabel;
+}
+
+function normaliseDuplicateLabel(label = '') {
+    const stripped = stripTrailingDisambiguation(label);
+
+    return String(stripped || '')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/&/g, ' and ')
+        .replace(/[’'`]/g, '')
+        .replace(/[-–—_:;,.!?/\\|"“”‘’]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+function getDraftDuplicateSearchLabels(draftRecord = {}) {
+    const raw = draftRecord.sourceMeta?.raw || {};
+    const info = draftRecord.proposedInfo || {};
+    const labels = [
+        getDraftProposedLabel(draftRecord),
+        info.label,
+        info.label_jp,
+        raw.title,
+        raw.pageTitle,
+        raw.displayTitle,
+        raw.englishTitle,
+        raw.originalTitle,
+        raw.japaneseWikipediaTitle
+    ];
+
+    const expanded = [];
+    labels.forEach(label => {
+        if (!label) return;
+        expanded.push(String(label).trim());
+        const stripped = stripTrailingDisambiguation(label);
+        if (stripped && stripped !== label) expanded.push(stripped);
+    });
+
+    return [...new Set(expanded.filter(Boolean))];
+}
+
 function formatDraftDuplicateCandidate(candidate = {}) {
     const info = candidate.info || {};
     const label = info.label || '(untitled)';
@@ -375,17 +429,35 @@ function formatDraftDuplicateCandidate(candidate = {}) {
 
 function isMeaningfulDraftDuplicate(candidate = {}, draftRecord = {}) {
     const info = candidate.info || {};
-    const candidateLabel = (info.label || '').trim().toLowerCase();
     const candidateType = (info.type || '').trim().toLowerCase();
-    const draftLabel = getDraftProposedLabel(draftRecord).toLowerCase();
     const draftType = getDraftProposedType(draftRecord).toLowerCase();
+    const typeCompatible = !draftType || !candidateType || draftType === candidateType;
 
-    if (!candidateLabel || !draftLabel) return false;
-    if (draftType && candidateType && draftType !== candidateType) return false;
+    const candidateLabels = [info.label, info.label_jp]
+        .filter(Boolean)
+        .map(normaliseDuplicateLabel)
+        .filter(Boolean);
+    const draftLabels = getDraftDuplicateSearchLabels(draftRecord)
+        .map(normaliseDuplicateLabel)
+        .filter(Boolean);
 
-    // Existing fuzzy search is deliberately broad. Keep the preflight list focused
-    // enough that it is a warning, not another giant search result dump.
-    return candidateLabel.includes(draftLabel) || draftLabel.includes(candidateLabel);
+    if (!candidateLabels.length || !draftLabels.length) return false;
+
+    // Exact normalised matches should warn even if the type is not identical; this
+    // catches browser imports where a person may be manually retyped later.
+    if (candidateLabels.some(candidateLabel => draftLabels.includes(candidateLabel))) {
+        return true;
+    }
+
+    if (!typeCompatible) return false;
+
+    // Keep partial matching conservative. This catches e.g. Wikipedia
+    // disambiguation leftovers, but avoids turning every broad Fuse result into a
+    // duplicate warning.
+    return candidateLabels.some(candidateLabel => draftLabels.some(draftLabel => {
+        if (candidateLabel.length < 5 || draftLabel.length < 5) return false;
+        return candidateLabel.includes(draftLabel) || draftLabel.includes(candidateLabel);
+    }));
 }
 
 function appendDraftDuplicatePreflight(panel, candidates = []) {
@@ -441,23 +513,34 @@ async function runDraftDuplicatePreflight(draftRecord = {}) {
     const panel = document.getElementById('draft-source-metadata');
     if (!panel) return [];
 
-    const label = getDraftProposedLabel(draftRecord);
+    const labels = getDraftDuplicateSearchLabels(draftRecord);
     currentDraftDuplicateCandidates = [];
     currentDraftDuplicateReviewAcknowledged = false;
 
-    if (!label) {
+    if (!labels.length) {
         appendDraftDuplicatePreflight(panel, []);
         return [];
     }
 
     try {
-        const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(label)}`);
-        const results = await response.json();
-        if (!response.ok) throw new Error(results.error || 'Duplicate preflight failed.');
+        const resultMap = new Map();
 
-        currentDraftDuplicateCandidates = Array.isArray(results)
-            ? results.filter(candidate => isMeaningfulDraftDuplicate(candidate, draftRecord)).slice(0, 8)
-            : [];
+        for (const label of labels) {
+            const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(label)}`);
+            const results = await response.json();
+            if (!response.ok) throw new Error(results.error || 'Duplicate preflight failed.');
+
+            if (Array.isArray(results)) {
+                results.forEach(candidate => {
+                    const key = candidate.id || candidate.info?.id || candidate.info?.label;
+                    if (key && !resultMap.has(key)) resultMap.set(key, candidate);
+                });
+            }
+        }
+
+        currentDraftDuplicateCandidates = [...resultMap.values()]
+            .filter(candidate => isMeaningfulDraftDuplicate(candidate, draftRecord))
+            .slice(0, 8);
         appendDraftDuplicatePreflight(panel, currentDraftDuplicateCandidates);
         return currentDraftDuplicateCandidates;
     } catch (error) {
