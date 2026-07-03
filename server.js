@@ -72,6 +72,142 @@ function normaliseInfo(info = {}) {
   return nextInfo;
 }
 
+
+function normaliseImportComparableLabel(value = '') {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/[’'`]/g, '')
+    .replace(/[-–—_:;,.!?/\\|"“”‘’()（）]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function hasMeaningfulImportValue(value) {
+  if (value === undefined || value === null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  return String(value).trim() !== '';
+}
+
+function buildImportTypeColorDefaults(documents = []) {
+  const countsByType = new Map();
+
+  documents.forEach(document => {
+    const type = String(document?.info?.type || '').trim();
+    const color = String(document?.info?.color || '').trim();
+    if (!type || !color) return;
+
+    if (!countsByType.has(type)) countsByType.set(type, new Map());
+    const colorCounts = countsByType.get(type);
+    colorCounts.set(color, (colorCounts.get(color) || 0) + 1);
+  });
+
+  const defaults = {};
+  countsByType.forEach((colorCounts, type) => {
+    const ranked = [...colorCounts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    if (ranked[0]) defaults[type] = ranked[0][0];
+  });
+
+  return defaults;
+}
+
+function applyImportTypeDefaultColor(info = {}, typeColorDefaults = {}) {
+  const nextInfo = normaliseInfo(info || {});
+  const type = String(nextInfo.type || '').trim();
+
+  if (!hasMeaningfulImportValue(nextInfo.color) && type && typeColorDefaults[type]) {
+    nextInfo.color = typeColorDefaults[type];
+  }
+
+  return nextInfo;
+}
+
+function appendUniqueImportText(existing = '', incoming = '') {
+  const oldText = String(existing || '').trim();
+  const newText = String(incoming || '').trim();
+  if (!newText) return oldText;
+  if (!oldText) return newText;
+  if (oldText.includes(newText)) return oldText;
+  if (newText.includes(oldText)) return newText;
+  return `${oldText}\n\n${newText}`;
+}
+
+function mergeImportedInfo(existingInfo = {}, incomingInfo = {}) {
+  const preferredExisting = new Set(['label', 'label_jp', 'birth', 'death']);
+  const appendFields = new Set(['note', 'note_jp', 'article']);
+  const keys = [...new Set([...Object.keys(existingInfo || {}), ...Object.keys(incomingInfo || {})])];
+  const merged = {};
+
+  keys.forEach(key => {
+    const existing = existingInfo?.[key];
+    const incoming = incomingInfo?.[key];
+
+    if (appendFields.has(key)) {
+      merged[key] = appendUniqueImportText(existing, incoming);
+      return;
+    }
+
+    if (preferredExisting.has(key)) {
+      merged[key] = hasMeaningfulImportValue(existing) ? existing : incoming;
+      return;
+    }
+
+    // Conservative default: fill gaps from incoming CSV, but preserve existing data.
+    merged[key] = hasMeaningfulImportValue(existing) ? existing : incoming;
+  });
+
+  Object.keys(merged).forEach(key => {
+    if (merged[key] === undefined) delete merged[key];
+  });
+
+  return normaliseInfo(merged);
+}
+
+function buildReferenceImportFuse(documents = []) {
+  return new Fuse(documents, {
+    keys: ['info.label', 'info.label_jp', 'id'],
+    threshold: 0.32,
+    ignoreLocation: true,
+    distance: 100,
+    includeScore: true,
+  });
+}
+
+function mapImportSearchCandidate(result, query = '') {
+  const item = result.item || result;
+  const info = item.info || {};
+  const wanted = normaliseImportComparableLabel(query);
+  const labels = [info.label, info.label_jp].filter(Boolean).map(normaliseImportComparableLabel);
+
+  return {
+    id: item.id,
+    info,
+    parentId: normaliseRelationshipArray(item.parentId),
+    children: normaliseRelationshipArray(item.children),
+    score: typeof result.score === 'number' ? result.score : null,
+    exactMatch: Boolean(wanted && labels.includes(wanted))
+  };
+}
+
+function searchImportCandidates(fuse, queries = [], limit = 5) {
+  const resultMap = new Map();
+
+  queries.filter(Boolean).forEach(query => {
+    fuse.search(String(query), { limit }).forEach(result => {
+      const candidate = mapImportSearchCandidate(result, query);
+      const previous = resultMap.get(candidate.id);
+      if (!previous || candidate.exactMatch || (candidate.score ?? 1) < (previous.score ?? 1)) {
+        resultMap.set(candidate.id, candidate);
+      }
+    });
+  });
+
+  return [...resultMap.values()]
+    .sort((a, b) => Number(b.exactMatch) - Number(a.exactMatch) || (a.score ?? 1) - (b.score ?? 1))
+    .slice(0, limit);
+}
+
 function slugifyImageCandidateLabel(label = '') {
   const slug = String(label || '')
     .normalize('NFKD')
@@ -2301,6 +2437,309 @@ app.get('/api/reference/label/all/:label', async (req, res) => {
       res.json(matchedItems);
   } catch (err) {
       res.status(500).json({ error: err.toString() });
+  }
+});
+
+
+const CSV_IMPORT_MAX_ROWS = 500;
+
+function normaliseImportResolutionEntries(entries = []) {
+  if (!Array.isArray(entries)) return new Map();
+  const map = new Map();
+  entries.forEach(entry => {
+    const label = String(entry?.label || '').trim();
+    const resolution = String(entry?.resolution || '').trim();
+    if (label && !map.has(label)) map.set(label, resolution);
+  });
+  return map;
+}
+
+function validateImportRelationshipReview(row, labelsField, resolutionsField, kind) {
+  const labels = [...new Set(
+    (Array.isArray(row?.[labelsField]) ? row[labelsField] : [])
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+  )];
+  const resolutions = normaliseImportResolutionEntries(row?.[resolutionsField]);
+
+  for (const label of labels) {
+    const resolution = String(resolutions.get(label) || '').trim();
+    if (!resolution) {
+      return `${kind} relationship “${label}” is unresolved for ${row.candidateKey}.`;
+    }
+    if (resolution === 'none') continue;
+    if (resolution.startsWith('existing:') && resolution.slice('existing:'.length).trim()) continue;
+    if (resolution.startsWith('batch:') && resolution.slice('batch:'.length).trim()) continue;
+    return `${kind} relationship “${label}” has an invalid resolution for ${row.candidateKey}.`;
+  }
+
+  return '';
+}
+
+// CSV import review preview. No writes are performed here.
+app.post('/api/reference/import-review/preview', async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (!rows.length) {
+      return res.status(400).json({ message: 'rows array is required.' });
+    }
+    if (rows.length > CSV_IMPORT_MAX_ROWS) {
+      return res.status(413).json({
+        message: `CSV import accepts at most ${CSV_IMPORT_MAX_ROWS} rows per batch; received ${rows.length}. Split the CSV into smaller batches.`
+      });
+    }
+
+    const collection = db.collection('reference');
+    const documents = await collection.find({}).toArray();
+    const fuse = buildReferenceImportFuse(documents);
+    const existingIds = new Set(documents.map(document => document.id).filter(Boolean));
+    const typeColorDefaults = buildImportTypeColorDefaults(documents);
+
+    const previewRows = rows.map(row => {
+      const originalInfo = normaliseInfo(row.info || {});
+      const info = applyImportTypeDefaultColor(originalInfo, typeColorDefaults);
+      const labelQueries = [info.label, info.label_jp].filter(Boolean);
+      const duplicateCandidates = searchImportCandidates(fuse, labelQueries, 5);
+      const parentLabels = Array.isArray(row.parentLabels) ? row.parentLabels.map(String).map(value => value.trim()).filter(Boolean) : [];
+      const childLabels = Array.isArray(row.childLabels) ? row.childLabels.map(String).map(value => value.trim()).filter(Boolean) : [];
+      const parentMatches = {};
+      const childMatches = {};
+
+      parentLabels.forEach(parentLabel => {
+        parentMatches[parentLabel] = searchImportCandidates(fuse, [parentLabel], 5);
+      });
+
+      childLabels.forEach(childLabel => {
+        childMatches[childLabel] = searchImportCandidates(fuse, [childLabel], 5);
+      });
+
+      const parentIds = normaliseRelationshipArray(row.parentIds);
+      const childIds = normaliseRelationshipArray(row.childIds || row.children);
+
+      return {
+        candidateKey: row.candidateKey,
+        rowNumber: row.rowNumber,
+        duplicateCandidates,
+        parentMatches,
+        childMatches,
+        autoColor: !hasMeaningfulImportValue(originalInfo.color) && hasMeaningfulImportValue(info.color) ? info.color : '',
+        validExplicitParentIds: parentIds.filter(id => existingIds.has(id)),
+        missingExplicitParentIds: parentIds.filter(id => !existingIds.has(id)),
+        validExplicitChildIds: childIds.filter(id => existingIds.has(id)),
+        missingExplicitChildIds: childIds.filter(id => !existingIds.has(id))
+      };
+    });
+
+    res.json({ rows: previewRows, total: previewRows.length });
+  } catch (err) {
+    console.error('Error previewing CSV import:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Commit reviewed CSV candidates. Duplicate choices are explicit; fuzzy matches are never auto-merged.
+app.post('/api/reference/import-review/commit', async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (!rows.length) {
+      return res.status(400).json({ message: 'rows array is required.' });
+    }
+    if (rows.length > CSV_IMPORT_MAX_ROWS) {
+      return res.status(413).json({
+        message: `CSV import accepts at most ${CSV_IMPORT_MAX_ROWS} rows per batch; received ${rows.length}. Split the CSV into smaller batches.`
+      });
+    }
+
+    const collection = db.collection('reference');
+    const typeColorDocuments = await collection.find(
+      { 'info.type': { $exists: true }, 'info.color': { $exists: true } },
+      { projection: { 'info.type': 1, 'info.color': 1 } }
+    ).toArray();
+    const typeColorDefaults = buildImportTypeColorDefaults(typeColorDocuments);
+    const allowedDecisions = new Set(['create', 'merge', 'skip']);
+    const candidateKeys = new Set();
+
+    for (const row of rows) {
+      if (!row?.candidateKey || candidateKeys.has(row.candidateKey)) {
+        return res.status(400).json({ message: 'Every row needs a unique candidateKey.' });
+      }
+      candidateKeys.add(row.candidateKey);
+      if (!allowedDecisions.has(row.decision)) {
+        return res.status(400).json({ message: `Unresolved or invalid decision for ${row.candidateKey}.` });
+      }
+      if (row.decision === 'merge' && !row.mergeTargetId) {
+        return res.status(400).json({ message: `Merge target is required for ${row.candidateKey}.` });
+      }
+
+      if (row.decision !== 'skip') {
+        const parentReviewError = validateImportRelationshipReview(row, 'parentLabels', 'parentResolutions', 'Parent');
+        if (parentReviewError) return res.status(400).json({ message: parentReviewError });
+        const childReviewError = validateImportRelationshipReview(row, 'childLabels', 'childResolutions', 'Child');
+        if (childReviewError) return res.status(400).json({ message: childReviewError });
+      }
+    }
+
+    // Validate reviewed relationship targets before any write occurs.
+    const acceptedCandidateKeys = new Set(rows.filter(row => row.decision !== 'skip').map(row => row.candidateKey));
+    const reviewedExistingIds = new Set();
+    for (const row of rows.filter(item => item.decision !== 'skip')) {
+      const resolutionEntries = [
+        ...(Array.isArray(row.parentResolutions) ? row.parentResolutions : []),
+        ...(Array.isArray(row.childResolutions) ? row.childResolutions : [])
+      ];
+      for (const entry of resolutionEntries) {
+        const resolution = String(entry?.resolution || '').trim();
+        if (resolution.startsWith('existing:')) {
+          reviewedExistingIds.add(resolution.slice('existing:'.length).trim());
+        }
+        if (resolution.startsWith('batch:')) {
+          const targetKey = resolution.slice('batch:'.length).trim();
+          if (!acceptedCandidateKeys.has(targetKey)) {
+            return res.status(400).json({
+              message: `Reviewed relationship target ${targetKey} is missing or skipped; resolve it again before committing.`
+            });
+          }
+        }
+      }
+    }
+
+    if (reviewedExistingIds.size) {
+      const reviewedExistingRecords = await collection.find(
+        { id: { $in: [...reviewedExistingIds] } },
+        { projection: { id: 1 } }
+      ).toArray();
+      const foundReviewedIds = new Set(reviewedExistingRecords.map(record => record.id));
+      const missingReviewedId = [...reviewedExistingIds].find(id => !foundReviewedIds.has(id));
+      if (missingReviewedId) {
+        return res.status(400).json({ message: `Reviewed relationship target not found: ${missingReviewedId}` });
+      }
+    }
+
+    const mergeTargetIds = [...new Set(rows.filter(row => row.decision === 'merge').map(row => String(row.mergeTargetId).trim()).filter(Boolean))];
+    const mergeTargets = mergeTargetIds.length
+      ? await collection.find({ id: { $in: mergeTargetIds } }).toArray()
+      : [];
+    const mergeTargetMap = new Map(mergeTargets.map(record => [record.id, record]));
+    const missingMergeTarget = mergeTargetIds.find(id => !mergeTargetMap.has(id));
+    if (missingMergeTarget) {
+      return res.status(400).json({ message: `Merge target not found: ${missingMergeTarget}` });
+    }
+
+    const resultByKey = new Map();
+    const importedAt = new Date().toISOString();
+    let created = 0;
+    let merged = 0;
+    let skipped = 0;
+
+    // First pass: create/merge records so every accepted row has a durable UUID.
+    for (const row of rows) {
+      if (row.decision === 'skip') {
+        resultByKey.set(row.candidateKey, { status: 'skipped', id: null });
+        skipped += 1;
+        continue;
+      }
+
+      const incomingInfo = applyImportTypeDefaultColor(row.info || {}, typeColorDefaults);
+
+      if (row.decision === 'create') {
+        const id = uuidv4();
+        await collection.insertOne({
+          id,
+          info: incomingInfo,
+          parentId: [],
+          children: [],
+          createdAt: importedAt
+        });
+        resultByKey.set(row.candidateKey, { status: 'created', id });
+        created += 1;
+        continue;
+      }
+
+      const target = mergeTargetMap.get(String(row.mergeTargetId).trim());
+      const mergedInfo = applyImportTypeDefaultColor(mergeImportedInfo(target.info || {}, incomingInfo), typeColorDefaults);
+      await collection.updateOne(
+        { id: target.id },
+        { $set: { info: mergedInfo } }
+      );
+      // Keep the in-memory target current so multiple CSV rows merged into the
+      // same existing record accumulate rather than overwriting one another.
+      target.info = mergedInfo;
+      mergeTargetMap.set(target.id, target);
+      resultByKey.set(row.candidateKey, { status: 'merged', id: target.id });
+      merged += 1;
+    }
+
+    // Validate explicit relationship IDs against the post-create database.
+    const explicitRelationshipIds = [...new Set(rows.flatMap(row => [
+      ...normaliseRelationshipArray(row.parentIds),
+      ...normaliseRelationshipArray(row.childIds || row.children)
+    ]))];
+    const explicitExistingRecords = explicitRelationshipIds.length
+      ? await collection.find({ id: { $in: explicitRelationshipIds } }, { projection: { id: 1 } }).toArray()
+      : [];
+    const explicitExistingIds = new Set(explicitExistingRecords.map(record => record.id));
+
+    // Second pass: resolve relationships after new UUIDs exist.
+    for (const row of rows) {
+      const result = resultByKey.get(row.candidateKey);
+      if (!result?.id) continue;
+
+      const parentIds = new Set(
+        normaliseRelationshipArray(row.parentIds).filter(id => explicitExistingIds.has(id))
+      );
+
+      const batchParentKeys = Array.isArray(row.batchParentKeys) ? row.batchParentKeys : [];
+      batchParentKeys.forEach(parentKey => {
+        const parentResult = resultByKey.get(parentKey);
+        if (parentResult?.id && parentResult.id !== result.id) parentIds.add(parentResult.id);
+      });
+
+      if (parentIds.size) {
+        const parentIdList = [...parentIds].filter(id => id !== result.id);
+        if (parentIdList.length) {
+          await collection.updateOne(
+            { id: result.id },
+            { $addToSet: { parentId: { $each: parentIdList } } }
+          );
+          await collection.updateMany(
+            { id: { $in: parentIdList } },
+            { $addToSet: { children: result.id } }
+          );
+        }
+      }
+
+      const childIds = new Set(
+        normaliseRelationshipArray(row.childIds || row.children)
+          .filter(id => explicitExistingIds.has(id) && id !== result.id)
+      );
+
+      const batchChildKeys = Array.isArray(row.batchChildKeys) ? row.batchChildKeys : [];
+      batchChildKeys.forEach(childKey => {
+        const childResult = resultByKey.get(childKey);
+        if (childResult?.id && childResult.id !== result.id) childIds.add(childResult.id);
+      });
+
+      const childIdList = [...childIds].filter(id => id !== result.id);
+      if (childIdList.length) {
+        await collection.updateOne(
+          { id: result.id },
+          { $addToSet: { children: { $each: childIdList } } }
+        );
+        await collection.updateMany(
+          { id: { $in: childIdList } },
+          { $addToSet: { parentId: result.id } }
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      summary: { created, merged, skipped },
+      rows: rows.map(row => ({ candidateKey: row.candidateKey, ...resultByKey.get(row.candidateKey) }))
+    });
+  } catch (err) {
+    console.error('Error committing CSV import:', err);
+    res.status(500).json({ error: err.toString() });
   }
 });
 

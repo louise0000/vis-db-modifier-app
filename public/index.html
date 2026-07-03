@@ -19,6 +19,7 @@
       <li><a href="#section-5">Delete Single Record</a></li>
       <li><a href="#section-6">Integrity Report</a></li>
       <li><a href="#section-7">Image Queue</a></li>
+      <li><a href="#section-8">CSV Import</a></li>
     </ul>
   </nav>
 
@@ -158,7 +159,96 @@
       </div>
 
     </div>
-    
+
+    <!-- Section 8: CSV import review -->
+    <div id="section-8" class="content-section">
+      <h2>CSV Import Review</h2>
+      <p>Upload a CSV, review fuzzy duplicate suggestions row by row, choose create / merge / skip, and resolve parent matches before writing anything.</p>
+
+      <div class="csv-import-toolbar">
+        <input id="csv-import-file" type="file" accept=".csv,text/csv">
+        <button id="csv-import-preview" type="button">Parse and Check Against Database</button>
+        <button id="csv-import-clear" type="button">Clear Import</button>
+      </div>
+
+      <p class="csv-import-help">Leave any unknown field blank. Parent and child columns may contain labels for review/matching after upload; parentId and childId columns are for explicit UUIDs. Other columns become info fields. Colour is filled automatically from the database's existing colour for that type when the CSV leaves color blank.</p>
+
+      <details class="csv-import-example" open>
+        <summary>Example CSV structure</summary>
+        <div class="csv-import-example-intro">
+          <p>Blank cells are fine. You do not need to type labels such as “birth:” into values; birth, death and date are separate columns.</p>
+          <a class="csv-import-sample-download" href="sample-reference-import.csv" download>Download sample CSV</a>
+        </div>
+        <div class="csv-import-example-table-wrap">
+          <table class="csv-import-example-table">
+            <thead>
+              <tr>
+                <th>type</th>
+                <th>label</th>
+                <th>label_jp</th>
+                <th>birth</th>
+                <th>death</th>
+                <th>date</th>
+                <th>note</th>
+                <th>note_jp</th>
+                <th>imgURL</th>
+                <th>parent</th>
+                <th>child</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>paradigm</td>
+                <td>Example Paradigm</td>
+                <td>サンプル・パラダイム</td>
+                <td></td><td></td><td></td>
+                <td>Example paradigm note.</td>
+                <td></td><td></td><td></td>
+                <td>Example Scholar</td>
+              </tr>
+              <tr>
+                <td>theorist</td>
+                <td>Example Scholar</td>
+                <td>サンプル研究者</td>
+                <td>1975</td><td></td><td></td>
+                <td>Example scholar note.</td>
+                <td>研究者ノートの例。</td>
+                <td></td><td></td>
+                <td>Example Book on Print and Media</td>
+              </tr>
+              <tr>
+                <td>artworkBook</td>
+                <td>Example Book on Print and Media</td>
+                <td>版とメディアのサンプル書籍</td>
+                <td></td><td></td><td>2024</td>
+                <td>Example book note.</td>
+                <td>書籍ノートの例。</td>
+                <td></td><td></td><td></td>
+              </tr>
+              <tr>
+                <td>artist</td>
+                <td>Example Artist</td>
+                <td>サンプル作家</td>
+                <td>1980</td><td></td><td></td>
+                <td>Example artist note.</td>
+                <td>作家ノートの例。</td>
+                <td></td><td>Example Paradigm</td><td></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="csv-import-example-note">Multiple parent or child labels can be separated with semicolons. Commas are preserved inside names and titles. Every textual relationship must be explicitly resolved or confirmed as no attachment before commit. Maximum 500 non-empty rows per batch. The importer checks both existing database records and other rows in the same CSV batch. Type colour is added automatically when color is blank or omitted.</p>
+      </details>
+
+      <div id="csv-import-summary"></div>
+      <div id="csv-import-candidates"></div>
+
+      <div class="csv-import-commit-bar">
+        <button id="csv-import-commit" type="button" disabled>Commit Reviewed Rows</button>
+        <span id="csv-import-commit-status"></span>
+      </div>
+    </div>
+
 
 
 

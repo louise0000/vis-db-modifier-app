@@ -3159,6 +3159,7 @@ function normaliseImageQueueRecord(record) {
         imageCandidateCloudStatus: record?.imageCandidateCloudStatus || '',
         imageCandidateCloudError: record?.imageCandidateCloudError || '',
         lastImageCandidateQuery: record?.lastImageCandidateQuery || '',
+        imageSearchExtraTerms: record?.imageSearchExtraTerms || '',
         raw: record
     };
 }
@@ -3205,7 +3206,9 @@ function buildImageSearchQuery(record) {
             : (record.type === 'artworkBook' ? (looksLikePublication ? '表紙' : '作品画像') : '画像');
     }
 
-    return [label, datePart, hint].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    const extraTerms = String(record?.imageSearchExtraTerms || '').trim();
+
+    return [label, datePart, extraTerms, hint].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 }
 
 function getImageCandidateDetail(record, url) {
@@ -3784,6 +3787,35 @@ function renderImageQueue() {
         query.textContent = `SerpApi query (${labelSource}): ${buildImageSearchQuery(record)}`;
         details.appendChild(query);
 
+        const queryControls = document.createElement('div');
+        queryControls.classList.add('image-queue-query-controls');
+
+        const extraTermsLabel = document.createElement('label');
+        extraTermsLabel.textContent = 'Extra SerpApi terms (optional)';
+        queryControls.appendChild(extraTermsLabel);
+
+        const extraTermsInput = document.createElement('input');
+        extraTermsInput.type = 'text';
+        extraTermsInput.classList.add('image-queue-extra-query-input');
+        extraTermsInput.placeholder = 'e.g. printmaker, Gutai, university';
+        extraTermsInput.value = record.imageSearchExtraTerms || '';
+        extraTermsInput.addEventListener('input', event => {
+            record.imageSearchExtraTerms = event.target.value;
+            query.textContent = `SerpApi query (${labelSource}): ${buildImageSearchQuery(record)}`;
+        });
+        queryControls.appendChild(extraTermsInput);
+
+        const fetchThisRecordButton = document.createElement('button');
+        fetchThisRecordButton.type = 'button';
+        fetchThisRecordButton.classList.add('image-queue-fetch-record-button');
+        fetchThisRecordButton.textContent = record.imageCandidateFetchStatus === 'fetching'
+            ? 'Fetching...'
+            : (record.lastImageCandidateQuery ? 'Refetch This Record' : 'Fetch This Record');
+        fetchThisRecordButton.disabled = record.imageCandidateFetchStatus === 'fetching';
+        fetchThisRecordButton.addEventListener('click', () => fetchSerpApiImageCandidatesForRecord(record));
+        queryControls.appendChild(fetchThisRecordButton);
+
+        details.appendChild(queryControls);
         details.appendChild(renderImageCandidateReview(record));
 
         card.appendChild(details);
@@ -3943,3 +3975,791 @@ function initialiseImageQueueScaffold() {
 }
 
 initialiseImageQueueScaffold();
+
+
+// -----------------------------------------------------------------------------
+// CSV import review
+// -----------------------------------------------------------------------------
+
+const CSV_IMPORT_MAX_ROWS = 500;
+
+const csvImportState = {
+    fileName: '',
+    candidates: [],
+    previewed: false,
+    busy: false
+};
+
+function parseCsvText(text = '') {
+    const rows = [];
+    let row = [];
+    let field = '';
+    let inQuotes = false;
+
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        const next = text[index + 1];
+
+        if (inQuotes) {
+            if (char === '"' && next === '"') {
+                field += '"';
+                index += 1;
+            } else if (char === '"') {
+                inQuotes = false;
+            } else {
+                field += char;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inQuotes = true;
+        } else if (char === ',') {
+            row.push(field);
+            field = '';
+        } else if (char === '\n') {
+            row.push(field);
+            rows.push(row);
+            row = [];
+            field = '';
+        } else if (char !== '\r') {
+            field += char;
+        }
+    }
+
+    row.push(field);
+    if (row.some(value => value !== '') || rows.length === 0) rows.push(row);
+    return rows;
+}
+
+function normaliseCsvHeader(header = '') {
+    return String(header || '').replace(/^\uFEFF/, '').trim();
+}
+
+function splitCsvRelationshipValues(value = '') {
+    return [...new Set(
+        String(value || '')
+            .split(/[;|]/)
+            .map(item => item.trim())
+            .filter(Boolean)
+    )];
+}
+
+function csvControlFieldKind(header = '') {
+    const key = String(header || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+
+    if (['id', 'uuid', 'record_id', 'recordid'].includes(key)) return 'incomingId';
+    if (['parent', 'parents', 'parent_label', 'parent_labels', 'parentlabel', 'parentlabels', 'author', 'authors', 'creator', 'creators'].includes(key)) return 'parentLabels';
+    if (['parent_id', 'parent_ids', 'parentid', 'parentids'].includes(key)) return 'parentIds';
+    if (['child', 'children', 'child_label', 'child_labels', 'childlabel', 'childlabels'].includes(key)) return 'childLabels';
+    if (['child_id', 'child_ids', 'childid', 'childids', 'children_id', 'children_ids', 'childrenid', 'childrenids'].includes(key)) return 'childIds';
+    return '';
+}
+
+function csvRowsToCandidates(rows = []) {
+    if (!rows.length) return [];
+
+    const headers = rows[0].map(normaliseCsvHeader);
+    const nonEmptyHeaders = headers.filter(Boolean);
+    if (!nonEmptyHeaders.length) throw new Error('CSV has no header row.');
+
+    return rows.slice(1).map((cells, index) => {
+        const info = {};
+        const parentLabels = [];
+        const parentIds = [];
+        const childLabels = [];
+        const childIds = [];
+        let incomingId = '';
+
+        headers.forEach((header, columnIndex) => {
+            if (!header) return;
+            const value = String(cells[columnIndex] ?? '').trim();
+            if (!value) return;
+
+            const controlKind = csvControlFieldKind(header);
+            if (controlKind === 'incomingId') {
+                incomingId = value;
+            } else if (controlKind === 'parentLabels') {
+                parentLabels.push(...splitCsvRelationshipValues(value));
+            } else if (controlKind === 'parentIds') {
+                parentIds.push(...splitCsvRelationshipValues(value));
+            } else if (controlKind === 'childLabels') {
+                childLabels.push(...splitCsvRelationshipValues(value));
+            } else if (controlKind === 'childIds') {
+                childIds.push(...splitCsvRelationshipValues(value));
+            } else {
+                info[header] = value;
+            }
+        });
+
+        const uniqueParentLabels = [...new Set(parentLabels)];
+        const uniqueParentIds = [...new Set(parentIds)];
+        const uniqueChildLabels = [...new Set(childLabels)];
+        const uniqueChildIds = [...new Set(childIds)];
+        const hasLabel = Boolean(String(info.label || '').trim() || String(info.label_jp || '').trim());
+
+        return {
+            candidateKey: `csv-row-${index + 2}`,
+            rowNumber: index + 2,
+            incomingId,
+            info,
+            parentLabels: uniqueParentLabels,
+            parentIds: uniqueParentIds,
+            childLabels: uniqueChildLabels,
+            childIds: uniqueChildIds,
+            duplicateCandidates: [],
+            parentMatches: {},
+            childMatches: {},
+            parentSelections: {},
+            childSelections: {},
+            decision: hasLabel ? 'create' : 'skip',
+            mergeTargetId: '',
+            parseWarning: hasLabel ? '' : 'No label or label_jp found; row defaults to skip.'
+        };
+    }).filter(candidate => Object.keys(candidate.info).length || candidate.parentLabels.length || candidate.parentIds.length || candidate.childLabels.length || candidate.childIds.length);
+}
+
+function csvNormaliseComparableLabel(value = '') {
+    return String(value || '')
+        .normalize('NFKC')
+        .replace(/[’'`]/g, '')
+        .replace(/[-–—_:;,.!?/\\|"“”‘’()（）]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+function csvAppendUniqueText(existing = '', incoming = '') {
+    const oldText = String(existing || '').trim();
+    const newText = String(incoming || '').trim();
+    if (!newText) return oldText;
+    if (!oldText) return newText;
+    if (oldText.includes(newText)) return oldText;
+    if (newText.includes(oldText)) return newText;
+    return `${oldText}\n\n${newText}`;
+}
+
+function buildCsvMergePreview(existingInfo = {}, incomingInfo = {}) {
+    const preferredExisting = new Set(['label', 'label_jp', 'birth', 'death']);
+    const appendFields = new Set(['note', 'note_jp', 'article']);
+    const keys = [...new Set([...Object.keys(existingInfo || {}), ...Object.keys(incomingInfo || {})])];
+    const merged = {};
+
+    keys.forEach(key => {
+        const existing = existingInfo?.[key];
+        const incoming = incomingInfo?.[key];
+        const hasExisting = existing !== undefined && existing !== null && String(existing).trim() !== '';
+        const hasIncoming = incoming !== undefined && incoming !== null && String(incoming).trim() !== '';
+
+        if (appendFields.has(key)) {
+            merged[key] = csvAppendUniqueText(existing, incoming);
+        } else if (preferredExisting.has(key)) {
+            merged[key] = hasExisting ? existing : incoming;
+        } else {
+            merged[key] = hasExisting ? existing : incoming;
+        }
+
+        if (merged[key] === undefined) delete merged[key];
+    });
+
+    return merged;
+}
+
+function csvCandidateDisplayLabel(candidate = {}) {
+    return candidate.info?.label || candidate.info?.label_jp || `(row ${candidate.rowNumber})`;
+}
+
+function csvExistingCandidateLabel(candidate = {}) {
+    const info = candidate.info || {};
+    const jp = info.label_jp ? ` / ${info.label_jp}` : '';
+    const type = info.type ? ` [${info.type}]` : '';
+    const exact = candidate.exactMatch ? ' — exact label match' : '';
+    return `${info.label || info.label_jp || '(untitled)'}${jp}${type}${exact}`;
+}
+
+function csvFindBatchRelationshipOptions(parentLabel, currentKey) {
+    const wanted = csvNormaliseComparableLabel(parentLabel);
+    if (!wanted) return [];
+
+    return csvImportState.candidates.filter(candidate => {
+        if (candidate.candidateKey === currentKey) return false;
+        const labels = [candidate.info?.label, candidate.info?.label_jp]
+            .filter(Boolean)
+            .map(csvNormaliseComparableLabel);
+        return labels.includes(wanted);
+    });
+}
+
+function createCsvFieldsList(info = {}) {
+    const list = document.createElement('ul');
+    list.classList.add('csv-import-fields');
+    Object.entries(info).forEach(([key, value]) => {
+        const item = document.createElement('li');
+        const keyNode = document.createElement('strong');
+        keyNode.textContent = key;
+        const valueNode = document.createElement('span');
+        valueNode.textContent = String(value ?? '');
+        item.appendChild(keyNode);
+        item.appendChild(valueNode);
+        list.appendChild(item);
+    });
+    return list;
+}
+
+function getCsvImportCandidateByKey(candidateKey) {
+    return csvImportState.candidates.find(candidate => candidate.candidateKey === candidateKey);
+}
+
+function getCsvRelationshipReviewIssues() {
+    const issues = [];
+    const activeCandidates = csvImportState.candidates.filter(candidate => candidate.decision !== 'skip');
+
+    const inspectSelections = (candidate, labels = [], selections = {}, kind = 'relationship') => {
+        labels.forEach(label => {
+            const resolution = String(selections?.[label] || '').trim();
+            if (!resolution) {
+                issues.push({
+                    candidateKey: candidate.candidateKey,
+                    rowNumber: candidate.rowNumber,
+                    kind,
+                    label,
+                    reason: 'unresolved'
+                });
+                return;
+            }
+
+            if (resolution === 'none' || resolution.startsWith('existing:')) return;
+
+            if (resolution.startsWith('batch:')) {
+                const targetKey = resolution.slice('batch:'.length);
+                const target = getCsvImportCandidateByKey(targetKey);
+                if (!target || target.decision === 'skip') {
+                    issues.push({
+                        candidateKey: candidate.candidateKey,
+                        rowNumber: candidate.rowNumber,
+                        kind,
+                        label,
+                        reason: 'batch-target-skipped-or-missing'
+                    });
+                }
+                return;
+            }
+
+            issues.push({
+                candidateKey: candidate.candidateKey,
+                rowNumber: candidate.rowNumber,
+                kind,
+                label,
+                reason: 'invalid-resolution'
+            });
+        });
+    };
+
+    activeCandidates.forEach(candidate => {
+        inspectSelections(candidate, candidate.parentLabels, candidate.parentSelections, 'parent');
+        inspectSelections(candidate, candidate.childLabels, candidate.childSelections, 'child');
+    });
+
+    return issues;
+}
+
+function updateCsvImportCommitAvailability() {
+    const commitButton = document.getElementById('csv-import-commit');
+    const status = document.getElementById('csv-import-commit-status');
+    if (!commitButton || !status) return;
+
+    const active = csvImportState.candidates.filter(candidate => candidate.decision !== 'skip');
+    const unresolvedDuplicates = active.filter(candidate => candidate.decision === 'review' || (candidate.decision === 'merge' && !candidate.mergeTargetId));
+    const unresolvedRelationships = getCsvRelationshipReviewIssues();
+
+    commitButton.disabled = csvImportState.busy
+        || !csvImportState.previewed
+        || active.length === 0
+        || unresolvedDuplicates.length > 0
+        || unresolvedRelationships.length > 0;
+
+    if (!csvImportState.previewed) {
+        status.textContent = 'Parse and check the CSV first.';
+    } else if (unresolvedDuplicates.length) {
+        status.textContent = `${unresolvedDuplicates.length} row${unresolvedDuplicates.length === 1 ? '' : 's'} still need a duplicate decision.`;
+    } else if (unresolvedRelationships.length) {
+        status.textContent = `${unresolvedRelationships.length} parent/child relationship${unresolvedRelationships.length === 1 ? '' : 's'} still need explicit resolution or “no attachment” confirmation.`;
+    } else {
+        status.textContent = `${active.length} row${active.length === 1 ? '' : 's'} ready to commit; ${csvImportState.candidates.length - active.length} skipped.`;
+    }
+}
+
+function renderCsvImportCandidate(candidate) {
+    const card = document.createElement('article');
+    card.classList.add('csv-import-card');
+    if (candidate.decision === 'review') card.classList.add('csv-import-needs-review');
+    else if (candidate.decision === 'skip') card.classList.add('csv-import-skip');
+    else card.classList.add('csv-import-ready');
+
+    const header = document.createElement('div');
+    header.classList.add('csv-import-card-header');
+    const title = document.createElement('h3');
+    title.textContent = csvCandidateDisplayLabel(candidate);
+    const meta = document.createElement('span');
+    meta.classList.add('csv-import-row-meta');
+    meta.textContent = `CSV row ${candidate.rowNumber}${candidate.info?.type ? ` · ${candidate.info.type}` : ''}`;
+    header.appendChild(title);
+    header.appendChild(meta);
+    card.appendChild(header);
+
+    if (candidate.parseWarning) {
+        const warning = document.createElement('div');
+        warning.classList.add('csv-import-warning');
+        warning.textContent = candidate.parseWarning;
+        card.appendChild(warning);
+    }
+
+    const grid = document.createElement('div');
+    grid.classList.add('csv-import-grid');
+
+    const incomingPanel = document.createElement('section');
+    incomingPanel.classList.add('csv-import-panel');
+    const incomingHeading = document.createElement('h4');
+    incomingHeading.textContent = 'Incoming fields';
+    incomingPanel.appendChild(incomingHeading);
+    incomingPanel.appendChild(createCsvFieldsList(candidate.info));
+    grid.appendChild(incomingPanel);
+
+    const reviewPanel = document.createElement('section');
+    reviewPanel.classList.add('csv-import-panel');
+    const reviewHeading = document.createElement('h4');
+    reviewHeading.textContent = 'Duplicate decision';
+    reviewPanel.appendChild(reviewHeading);
+
+    const decisionRow = document.createElement('div');
+    decisionRow.classList.add('csv-import-decision-row');
+    const decisionLabel = document.createElement('label');
+    decisionLabel.textContent = 'Action';
+    const decisionSelect = document.createElement('select');
+    [
+        ['review', 'Needs review'],
+        ['create', 'Not a duplicate — create new'],
+        ['merge', 'Duplicate — merge into existing'],
+        ['skip', 'Skip this row']
+    ].forEach(([value, text]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = text;
+        option.selected = candidate.decision === value;
+        decisionSelect.appendChild(option);
+    });
+    decisionSelect.addEventListener('change', () => {
+        candidate.decision = decisionSelect.value;
+        if (candidate.decision !== 'merge') candidate.mergeTargetId = '';
+        renderCsvImportCandidates();
+    });
+    decisionRow.appendChild(decisionLabel);
+    decisionRow.appendChild(decisionSelect);
+    reviewPanel.appendChild(decisionRow);
+
+    const duplicateList = document.createElement('div');
+    duplicateList.classList.add('csv-import-duplicate-list');
+    if (!candidate.duplicateCandidates.length) {
+        const noMatch = document.createElement('p');
+        noMatch.textContent = 'No plausible existing record found.';
+        duplicateList.appendChild(noMatch);
+    } else {
+        candidate.duplicateCandidates.forEach(existing => {
+            const optionLabel = document.createElement('label');
+            optionLabel.classList.add('csv-import-duplicate-option');
+            if (existing.exactMatch) optionLabel.classList.add('exact-match');
+            const radio = document.createElement('input');
+            radio.type = 'radio';
+            radio.name = `csv-merge-${candidate.candidateKey}`;
+            radio.value = existing.id;
+            radio.checked = candidate.mergeTargetId === existing.id;
+            radio.addEventListener('change', () => {
+                candidate.mergeTargetId = existing.id;
+                candidate.decision = 'merge';
+                renderCsvImportCandidates();
+            });
+            const text = document.createElement('span');
+            text.textContent = csvExistingCandidateLabel(existing);
+            optionLabel.appendChild(radio);
+            optionLabel.appendChild(text);
+            duplicateList.appendChild(optionLabel);
+        });
+    }
+    reviewPanel.appendChild(duplicateList);
+
+    if (candidate.decision === 'merge' && candidate.mergeTargetId) {
+        const target = candidate.duplicateCandidates.find(existing => existing.id === candidate.mergeTargetId);
+        if (target) {
+            const preview = document.createElement('div');
+            preview.classList.add('csv-import-merge-preview');
+            const previewHeading = document.createElement('strong');
+            previewHeading.textContent = 'Merge preview (existing values preserved; new notes appended)';
+            preview.appendChild(previewHeading);
+            preview.appendChild(createCsvFieldsList(buildCsvMergePreview(target.info || {}, candidate.info || {})));
+            reviewPanel.appendChild(preview);
+        }
+    }
+
+    grid.appendChild(reviewPanel);
+    card.appendChild(grid);
+
+    if (candidate.parentLabels.length || candidate.parentIds.length) {
+        const parentsPanel = document.createElement('section');
+        parentsPanel.classList.add('csv-import-panel');
+        parentsPanel.style.marginTop = '12px';
+        const parentsHeading = document.createElement('h4');
+        parentsHeading.textContent = 'Parent matching';
+        parentsPanel.appendChild(parentsHeading);
+
+        if (candidate.parentIds.length) {
+            const explicit = document.createElement('p');
+            explicit.textContent = `Explicit parent IDs from CSV: ${candidate.parentIds.join(', ')}`;
+            parentsPanel.appendChild(explicit);
+        }
+
+        const parentList = document.createElement('div');
+        parentList.classList.add('csv-import-parent-list');
+        candidate.parentLabels.forEach(parentLabel => {
+            const item = document.createElement('div');
+            item.classList.add('csv-import-parent-item');
+            const labelNode = document.createElement('span');
+            labelNode.textContent = parentLabel;
+            const select = document.createElement('select');
+            select.classList.add('csv-import-parent-select');
+
+            const unresolvedOption = document.createElement('option');
+            unresolvedOption.value = '';
+            unresolvedOption.textContent = 'Choose parent resolution…';
+            select.appendChild(unresolvedOption);
+
+            const none = document.createElement('option');
+            none.value = 'none';
+            none.textContent = 'No parent attachment — confirmed';
+            select.appendChild(none);
+
+            const batchOptions = csvFindBatchRelationshipOptions(parentLabel, candidate.candidateKey);
+            batchOptions.forEach(batchCandidate => {
+                const option = document.createElement('option');
+                option.value = `batch:${batchCandidate.candidateKey}`;
+                option.textContent = `CSV row ${batchCandidate.rowNumber}: ${csvCandidateDisplayLabel(batchCandidate)}`;
+                select.appendChild(option);
+            });
+
+            (candidate.parentMatches[parentLabel] || []).forEach(existing => {
+                const option = document.createElement('option');
+                option.value = `existing:${existing.id}`;
+                option.textContent = `Existing: ${csvExistingCandidateLabel(existing)}`;
+                select.appendChild(option);
+            });
+
+            const selected = candidate.parentSelections[parentLabel] || '';
+            select.value = selected;
+            select.addEventListener('change', () => {
+                candidate.parentSelections[parentLabel] = select.value;
+                updateCsvImportCommitAvailability();
+            });
+
+            item.appendChild(labelNode);
+            item.appendChild(select);
+            parentList.appendChild(item);
+        });
+        parentsPanel.appendChild(parentList);
+        card.appendChild(parentsPanel);
+    }
+
+    if (candidate.childLabels.length || candidate.childIds.length) {
+        const childrenPanel = document.createElement('section');
+        childrenPanel.classList.add('csv-import-panel');
+        childrenPanel.style.marginTop = '12px';
+        const childrenHeading = document.createElement('h4');
+        childrenHeading.textContent = 'Child matching';
+        childrenPanel.appendChild(childrenHeading);
+
+        if (candidate.childIds.length) {
+            const explicit = document.createElement('p');
+            explicit.textContent = `Explicit child IDs from CSV: ${candidate.childIds.join(', ')}`;
+            childrenPanel.appendChild(explicit);
+        }
+
+        const childList = document.createElement('div');
+        childList.classList.add('csv-import-parent-list');
+        candidate.childLabels.forEach(childLabel => {
+            const item = document.createElement('div');
+            item.classList.add('csv-import-parent-item');
+            const labelNode = document.createElement('span');
+            labelNode.textContent = childLabel;
+            const select = document.createElement('select');
+            select.classList.add('csv-import-parent-select');
+
+            const unresolvedOption = document.createElement('option');
+            unresolvedOption.value = '';
+            unresolvedOption.textContent = 'Choose child resolution…';
+            select.appendChild(unresolvedOption);
+
+            const none = document.createElement('option');
+            none.value = 'none';
+            none.textContent = 'No child attachment — confirmed';
+            select.appendChild(none);
+
+            const batchOptions = csvFindBatchRelationshipOptions(childLabel, candidate.candidateKey);
+            batchOptions.forEach(batchCandidate => {
+                const option = document.createElement('option');
+                option.value = `batch:${batchCandidate.candidateKey}`;
+                option.textContent = `CSV row ${batchCandidate.rowNumber}: ${csvCandidateDisplayLabel(batchCandidate)}`;
+                select.appendChild(option);
+            });
+
+            (candidate.childMatches[childLabel] || []).forEach(existing => {
+                const option = document.createElement('option');
+                option.value = `existing:${existing.id}`;
+                option.textContent = `Existing: ${csvExistingCandidateLabel(existing)}`;
+                select.appendChild(option);
+            });
+
+            const selected = candidate.childSelections[childLabel] || '';
+            select.value = selected;
+            select.addEventListener('change', () => {
+                candidate.childSelections[childLabel] = select.value;
+                updateCsvImportCommitAvailability();
+            });
+
+            item.appendChild(labelNode);
+            item.appendChild(select);
+            childList.appendChild(item);
+        });
+        childrenPanel.appendChild(childList);
+        card.appendChild(childrenPanel);
+    }
+
+    return card;
+}
+
+function renderCsvImportCandidates() {
+    const container = document.getElementById('csv-import-candidates');
+    const summary = document.getElementById('csv-import-summary');
+    if (!container || !summary) return;
+
+    container.innerHTML = '';
+    summary.innerHTML = '';
+
+    if (!csvImportState.candidates.length) {
+        updateCsvImportCommitAvailability();
+        return;
+    }
+
+    summary.classList.add('csv-import-summary');
+    const possibleDuplicates = csvImportState.candidates.filter(candidate => candidate.duplicateCandidates.length).length;
+    summary.textContent = `${csvImportState.fileName || 'CSV'} · ${csvImportState.candidates.length} rows · ${possibleDuplicates} rows have possible duplicate candidates.`;
+
+    csvImportState.candidates.forEach(candidate => {
+        container.appendChild(renderCsvImportCandidate(candidate));
+    });
+
+    updateCsvImportCommitAvailability();
+}
+
+async function previewCsvImport() {
+    const fileInput = document.getElementById('csv-import-file');
+    const file = fileInput?.files?.[0];
+    if (!file) {
+        alert('Choose a CSV file first.');
+        return;
+    }
+
+    csvImportState.busy = true;
+    updateCsvImportCommitAvailability();
+
+    try {
+        const text = await file.text();
+        const parsedRows = parseCsvText(text);
+        const candidates = csvRowsToCandidates(parsedRows);
+        if (!candidates.length) throw new Error('No importable rows found in CSV.');
+        if (candidates.length > CSV_IMPORT_MAX_ROWS) {
+            throw new Error(`This importer accepts at most ${CSV_IMPORT_MAX_ROWS} non-empty data rows per CSV. This file has ${candidates.length}. Split it into smaller batches before previewing.`);
+        }
+
+        const response = await fetch(`${baseURL}/api/reference/import-review/preview`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                rows: candidates.map(candidate => ({
+                    candidateKey: candidate.candidateKey,
+                    rowNumber: candidate.rowNumber,
+                    info: candidate.info,
+                    parentLabels: candidate.parentLabels,
+                    parentIds: candidate.parentIds,
+                    childLabels: candidate.childLabels,
+                    childIds: candidate.childIds
+                }))
+            })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || 'CSV preview failed.');
+
+        const previewByKey = new Map((data.rows || []).map(row => [row.candidateKey, row]));
+        candidates.forEach(candidate => {
+            const preview = previewByKey.get(candidate.candidateKey) || {};
+            candidate.duplicateCandidates = preview.duplicateCandidates || [];
+            candidate.parentMatches = preview.parentMatches || {};
+            candidate.childMatches = preview.childMatches || {};
+            candidate.validExplicitParentIds = preview.validExplicitParentIds || [];
+            candidate.missingExplicitParentIds = preview.missingExplicitParentIds || [];
+            candidate.validExplicitChildIds = preview.validExplicitChildIds || [];
+            candidate.missingExplicitChildIds = preview.missingExplicitChildIds || [];
+
+            if (!candidate.info.color && preview.autoColor) {
+                candidate.info.color = preview.autoColor;
+            }
+
+            if (candidate.duplicateCandidates.length) {
+                candidate.decision = 'review';
+            } else if (!candidate.parseWarning) {
+                candidate.decision = 'create';
+            }
+
+            if (candidate.missingExplicitParentIds.length) {
+                candidate.parseWarning = `${candidate.parseWarning ? `${candidate.parseWarning} ` : ''}Missing explicit parent IDs: ${candidate.missingExplicitParentIds.join(', ')}`;
+            }
+            if (candidate.missingExplicitChildIds.length) {
+                candidate.parseWarning = `${candidate.parseWarning ? `${candidate.parseWarning} ` : ''}Missing explicit child IDs: ${candidate.missingExplicitChildIds.join(', ')}`;
+            }
+        });
+
+        csvImportState.fileName = file.name;
+        csvImportState.candidates = candidates;
+        csvImportState.previewed = true;
+        renderCsvImportCandidates();
+    } catch (error) {
+        console.error('CSV import preview failed:', error);
+        alert(`CSV import preview failed: ${error.message}`);
+    } finally {
+        csvImportState.busy = false;
+        updateCsvImportCommitAvailability();
+    }
+}
+
+function buildCsvImportCommitPayload() {
+    return csvImportState.candidates.map(candidate => {
+        const selectedParentIds = [];
+        const batchParentKeys = [];
+        const selectedChildIds = [];
+        const batchChildKeys = [];
+
+        Object.values(candidate.parentSelections || {}).forEach(value => {
+            if (String(value).startsWith('existing:')) selectedParentIds.push(String(value).slice('existing:'.length));
+            if (String(value).startsWith('batch:')) batchParentKeys.push(String(value).slice('batch:'.length));
+        });
+
+        Object.values(candidate.childSelections || {}).forEach(value => {
+            if (String(value).startsWith('existing:')) selectedChildIds.push(String(value).slice('existing:'.length));
+            if (String(value).startsWith('batch:')) batchChildKeys.push(String(value).slice('batch:'.length));
+        });
+
+        return {
+            candidateKey: candidate.candidateKey,
+            rowNumber: candidate.rowNumber,
+            decision: candidate.decision,
+            mergeTargetId: candidate.mergeTargetId,
+            info: candidate.info,
+            parentLabels: candidate.parentLabels,
+            childLabels: candidate.childLabels,
+            parentResolutions: candidate.parentLabels.map(label => ({
+                label,
+                resolution: String(candidate.parentSelections?.[label] || '')
+            })),
+            childResolutions: candidate.childLabels.map(label => ({
+                label,
+                resolution: String(candidate.childSelections?.[label] || '')
+            })),
+            parentIds: [...new Set([...(candidate.validExplicitParentIds || []), ...selectedParentIds])],
+            batchParentKeys: [...new Set(batchParentKeys)],
+            childIds: [...new Set([...(candidate.validExplicitChildIds || []), ...selectedChildIds])],
+            batchChildKeys: [...new Set(batchChildKeys)]
+        };
+    });
+}
+
+async function commitCsvImport() {
+    if (csvImportState.busy) return;
+
+    const active = csvImportState.candidates.filter(candidate => candidate.decision !== 'skip');
+    const unresolved = active.filter(candidate => candidate.decision === 'review' || (candidate.decision === 'merge' && !candidate.mergeTargetId));
+    if (unresolved.length) {
+        alert('Resolve every possible duplicate row before committing.');
+        return;
+    }
+
+    const relationshipIssues = getCsvRelationshipReviewIssues();
+    if (relationshipIssues.length) {
+        alert('Resolve every parent/child label explicitly, or choose the confirmed no-attachment option, before committing.');
+        return;
+    }
+
+    const confirmed = window.confirm(`Commit ${active.length} reviewed CSV row${active.length === 1 ? '' : 's'} to the reference database?`);
+    if (!confirmed) return;
+
+    csvImportState.busy = true;
+    updateCsvImportCommitAvailability();
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/import-review/commit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rows: buildCsvImportCommitPayload(), fileName: csvImportState.fileName })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || 'CSV import commit failed.');
+
+        const status = document.getElementById('csv-import-commit-status');
+        if (status) {
+            status.textContent = `Committed: ${data.summary?.created || 0} created, ${data.summary?.merged || 0} merged, ${data.summary?.skipped || 0} skipped.`;
+        }
+
+        csvImportState.previewed = false;
+        csvImportState.candidates = [];
+        const container = document.getElementById('csv-import-candidates');
+        const summary = document.getElementById('csv-import-summary');
+        if (container) container.innerHTML = '';
+        if (summary) {
+            summary.classList.add('csv-import-summary');
+            summary.textContent = `Import complete: ${data.summary?.created || 0} created, ${data.summary?.merged || 0} merged, ${data.summary?.skipped || 0} skipped.`;
+        }
+    } catch (error) {
+        console.error('CSV import commit failed:', error);
+        alert(`CSV import commit failed: ${error.message}`);
+    } finally {
+        csvImportState.busy = false;
+        updateCsvImportCommitAvailability();
+    }
+}
+
+function clearCsvImport() {
+    csvImportState.fileName = '';
+    csvImportState.candidates = [];
+    csvImportState.previewed = false;
+    csvImportState.busy = false;
+    const fileInput = document.getElementById('csv-import-file');
+    const container = document.getElementById('csv-import-candidates');
+    const summary = document.getElementById('csv-import-summary');
+    const status = document.getElementById('csv-import-commit-status');
+    if (fileInput) fileInput.value = '';
+    if (container) container.innerHTML = '';
+    if (summary) {
+        summary.innerHTML = '';
+        summary.classList.remove('csv-import-summary');
+    }
+    if (status) status.textContent = '';
+    updateCsvImportCommitAvailability();
+}
+
+function initialiseCsvImportReview() {
+    const previewButton = document.getElementById('csv-import-preview');
+    const clearButton = document.getElementById('csv-import-clear');
+    const commitButton = document.getElementById('csv-import-commit');
+    if (previewButton) previewButton.addEventListener('click', previewCsvImport);
+    if (clearButton) clearButton.addEventListener('click', clearCsvImport);
+    if (commitButton) commitButton.addEventListener('click', commitCsvImport);
+    updateCsvImportCommitAvailability();
+}
+
+initialiseCsvImportReview();
