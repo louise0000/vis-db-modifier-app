@@ -1306,3 +1306,21 @@ nav ul li a:hover {
     color: #333;
     text-decoration: underline;
 }
+
+
+/* Search result bilingual labels */
+.result-label-jp {
+    margin-left: 0.45em;
+    opacity: 0.72;
+    font-size: 0.94em;
+}
+
+.result-type-chip {
+    display: inline-block;
+    margin-left: 0.45em;
+    padding: 1px 5px;
+    border: 1px solid #00000022;
+    border-radius: 999px;
+    font-size: 10px;
+    opacity: 0.68;
+}

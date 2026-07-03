@@ -74,6 +74,69 @@ function parseEditedInfoValue(value, originalValue) {
     return rawValue;
 }
 
+function escapeHTML(value = '') {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[char]));
+}
+
+function getSearchResultFields(item = {}) {
+    const info = item.info || {};
+    return {
+        id: item.id || info.id || '',
+        label: item.label || info.label || '',
+        labelJp: item.label_jp || info.label_jp || '',
+        birth: info.birth || item.birth || '',
+        death: info.death || item.death || '',
+        date: item.date || info.date || '',
+        type: item.type || info.type || '',
+        parentLabels: item.parentLabels || []
+    };
+}
+
+function formatBaseAndJapaneseLabel(label, labelJp) {
+    const baseLabel = escapeHTML(label || '(Untitled record)');
+    const jpLabel = String(labelJp || '').trim();
+    if (!jpLabel || jpLabel === label) return baseLabel;
+    return `${baseLabel} <span class="result-label-jp">${escapeHTML(jpLabel)}</span>`;
+}
+
+function formatSearchResultLabel(item = {}) {
+    const { label, labelJp, birth, death, date, type, parentLabels } = getSearchResultFields(item);
+    let formattedLabel = formatBaseAndJapaneseLabel(label, labelJp);
+
+    if (type === 'theorist' || type === 'artist') {
+        if (birth && death) {
+            formattedLabel += ` <strong>${escapeHTML(birth)}–${escapeHTML(death)}</strong>`;
+        } else if (birth && !death) {
+            formattedLabel += ` <strong>${escapeHTML(birth)}–</strong>`;
+        }
+    } else if (type === 'artworkBook') {
+        if (parentLabels.length > 0) {
+            const firstNonGhost = escapeHTML(parentLabels[0]);
+            const coAuthors = parentLabels.slice(1).filter(Boolean).map(escapeHTML);
+            formattedLabel = `<strong>${firstNonGhost}`;
+            if (coAuthors.length > 0) {
+                formattedLabel += ` & ${coAuthors.join(' & ')}`;
+            }
+            formattedLabel += `</strong>/ ${formatBaseAndJapaneseLabel(label, labelJp)}`;
+            if (date) formattedLabel += ` <strong>${escapeHTML(date)}</strong>`;
+        } else if (date) {
+            formattedLabel += ` <strong>${escapeHTML(date)}</strong>`;
+        }
+    }
+
+    if (type && type !== 'artworkBook') {
+        formattedLabel += ` <span class="result-type-chip">${escapeHTML(type)}</span>`;
+    }
+
+    return formattedLabel;
+}
+
 function appendFormField(container, key, value) {
     const label = document.createElement('label');
     label.textContent = key.charAt(0).toUpperCase() + key.slice(1) + ':';
@@ -957,41 +1020,11 @@ async function renderResults(data, resultElementId, multiple = false) {
         selectElement.classList.add('custom-select');
 
         for (const item of data) {
-            const label = item.label || item.info?.label || ''; // Handles the case for both the new and old data structure
-            const id = item.id || item.info?.id; // Ensure we get the correct id
-            const birth = item.info?.birth || '';
-            const death = item.info?.death || '';
-            const date = item.date || item.info?.date || '';
-            const type = item.type || item.info?.type || '';
-            const parentLabels = item.parentLabels || [];
-
-            let formattedLabel = label;
-
-            if (type === "theorist" || type === "artist") {
-                if (birth && death) {
-                    formattedLabel += ` <strong>${birth}–${death}</strong>`;
-                } else if (birth && !death) {
-                    formattedLabel += ` <strong>${birth}–</strong>`;
-                }
-            } else if (type === "artworkBook") {
-                if (parentLabels.length > 0) {
-                    const firstNonGhost = parentLabels[0];
-                    const coAuthors = parentLabels.slice(1).filter(label => label); // Filter non-empty co-authors
-                    formattedLabel = `<strong>${firstNonGhost}`;
-                    if (coAuthors.length > 0) {
-                        formattedLabel += ' & ' + coAuthors.join(' & ');
-                    }
-                    formattedLabel += `</strong>/ ${label} <strong>${date}</strong>`;
-                } else if (date) {
-                    formattedLabel = `${label} <strong>${date}</strong>`;
-                }
-            }
-
-            // Create a custom option element with data-id
+            const { id } = getSearchResultFields(item);
             const optionElement = document.createElement('div');
             optionElement.classList.add('custom-option');
-            optionElement.dataset.id = id; // Assign the ID to the data-id attribute
-            optionElement.innerHTML = formattedLabel;
+            optionElement.dataset.id = id;
+            optionElement.innerHTML = formatSearchResultLabel(item);
 
             if (multiple) {
                 optionElement.addEventListener('click', () => {
@@ -1601,41 +1634,11 @@ async function renderEditableResults(data, resultElementId) {
         selectElement.classList.add('custom-select');
 
         for (const item of data) {
-            const label = item.label || item.info?.label || ''; // Handles the case for both the new and old data structure
-            const id = item.id || item.info?.id; // Ensure we get the correct id
-            const birth = item.info?.birth || '';
-            const death = item.info?.death || '';
-            const date = item.date || item.info?.date || '';
-            const type = item.type || item.info?.type || '';
-            const parentLabels = item.parentLabels || [];
-
-            let formattedLabel = label;
-
-            if (type === "theorist" || type === "artist") {
-                if (birth && death) {
-                    formattedLabel += ` <strong>${birth}–${death}</strong>`;
-                } else if (birth && !death) {
-                    formattedLabel += ` <strong>${birth}–</strong>`;
-                }
-            } else if (type === "artworkBook") {
-                if (parentLabels.length > 0) {
-                    const firstNonGhost = parentLabels[0];
-                    const coAuthors = parentLabels.slice(1).filter(label => label); // Filter non-empty co-authors
-                    formattedLabel = `<strong>${firstNonGhost}`;
-                    if (coAuthors.length > 0) {
-                        formattedLabel += ' & ' + coAuthors.join(' & ');
-                    }
-                    formattedLabel += `</strong>/ ${label} <strong>${date}</strong>`;
-                } else if (date) {
-                    formattedLabel = `${label} <strong>${date}</strong>`;
-                }
-            }
-
-            // Create a custom option element with data-id
+            const { id } = getSearchResultFields(item);
             const optionElement = document.createElement('div');
             optionElement.classList.add('custom-option');
-            optionElement.dataset.id = id; // Assign the ID to the data-id attribute
-            optionElement.innerHTML = formattedLabel;
+            optionElement.dataset.id = id;
+            optionElement.innerHTML = formatSearchResultLabel(item);
 
             // Event listener to handle edit selection
             optionElement.addEventListener('click', () => {
@@ -1846,8 +1849,7 @@ function renderDeletableResults(data, resultElementId) {
 
     if (Array.isArray(data) && data.length > 0) {
         data.forEach(item => {
-            const label = item.label || item.info?.label || ''; // Handles the case for both the new and old data structure
-            const id = item.id || item.info?.id; // Ensure we get the correct id
+            const { id, label, labelJp } = getSearchResultFields(item)
 
             // Create a wrapper div
             const wrapperDiv = document.createElement('div');
@@ -1860,7 +1862,7 @@ function renderDeletableResults(data, resultElementId) {
 
             // Create a label for the record
             const labelElement = document.createElement('label');
-            labelElement.textContent = `${label} (ID: ${id})`;
+            labelElement.textContent = `${label}${labelJp && labelJp !== label ? ` / ${labelJp}` : ''} (ID: ${id})`;
 
             wrapperDiv.appendChild(checkbox);
             wrapperDiv.appendChild(labelElement);

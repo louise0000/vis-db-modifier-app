@@ -311,8 +311,9 @@ app.get('/api/reference/label/theorist-artist/:label', async (req, res) => {
     const documents = await collection.find({ $or: [{ "info.type": "theorist" }, { "info.type": "artist" }] }).toArray();
 
     const options = {
-      keys: ['info.label'],
+      keys: ['info.label', 'info.label_jp', 'id'],
       threshold: 0.3,
+      ignoreLocation: true,
       distance: 100,
       includeScore: true,
     };
@@ -324,6 +325,7 @@ app.get('/api/reference/label/theorist-artist/:label', async (req, res) => {
         id: result.item.id,  // Include the id
         info: {
           label: result.item.info.label,
+          label_jp: result.item.info.label_jp || '',
           birth: result.item.info.birth || null,
           death: result.item.info.death || null,
           type: result.item.info.type || null
@@ -345,8 +347,9 @@ app.get('/api/reference/label/artworkbook/:label', async (req, res) => {
     const documents = await collection.find({ "info.type": "artworkBook" }).toArray();
 
     const options = {
-      keys: ['info.label'],
+      keys: ['info.label', 'info.label_jp', 'id'],
       threshold: 0.3,
+      ignoreLocation: true,
       distance: 100,
       includeScore: true,
     };
@@ -375,6 +378,7 @@ app.get('/api/reference/label/artworkbook/:label', async (req, res) => {
         children: artwork.children || [],  // Include children array
         parentLabels,
         label: artwork.info.label,
+        label_jp: artwork.info.label_jp || '',
         date: artwork.info.date || null,
         type: artwork.info.type || null
       };
@@ -410,6 +414,7 @@ app.get('/api/reference/orphans', async (req, res) => {
         parentId: artwork.parentId || [],
         children: artwork.children || [],
         label: artwork.info.label,
+        label_jp: artwork.info.label_jp || '',
         date: artwork.info.date || null,
         type: artwork.info.type || null
       };
@@ -2205,8 +2210,9 @@ app.get('/api/reference/label/all/:label', async (req, res) => {
       const documents = await collection.find({}).toArray(); // Fetch all documents
 
       const options = {
-          keys: ['info.label'],
+          keys: ['info.label', 'info.label_jp', 'id'],
           threshold: 0.3,
+          ignoreLocation: true,
           distance: 100,
           includeScore: true,
       };
