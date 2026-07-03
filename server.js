@@ -2233,7 +2233,8 @@ app.get('/api/reference/label/all/:label', async (req, res) => {
   }
 });
 
-// Update an existing record
+// Update an existing record. Parent/child arrays are optional root-level edits.
+// They deliberately update only this record; reciprocal links are not created here.
 app.put('/api/reference/update/:id', async (req, res) => {
   try {
       const id = req.params.id;
@@ -2242,6 +2243,14 @@ app.put('/api/reference/update/:id', async (req, res) => {
 
       if (!updatedInfo || typeof updatedInfo !== 'object' || Array.isArray(updatedInfo)) {
           return res.status(400).json({ message: 'Invalid request: info object is required.' });
+      }
+
+      if (Object.prototype.hasOwnProperty.call(req.body, 'parentId') && !Array.isArray(req.body.parentId)) {
+          return res.status(400).json({ message: 'Invalid request: parentId must be an array.' });
+      }
+
+      if (Object.prototype.hasOwnProperty.call(req.body, 'children') && !Array.isArray(req.body.children)) {
+          return res.status(400).json({ message: 'Invalid request: children must be an array.' });
       }
 
       const existingRecord = await collection.findOne({ id });
@@ -2255,7 +2264,17 @@ app.put('/api/reference/update/:id', async (req, res) => {
           ...updatedInfo
       });
 
-      const result = await collection.updateOne({ id }, { $set: { info: mergedInfo } });
+      const setFields = { info: mergedInfo };
+
+      if (Object.prototype.hasOwnProperty.call(req.body, 'parentId')) {
+          setFields.parentId = normaliseRelationshipArray(req.body.parentId);
+      }
+
+      if (Object.prototype.hasOwnProperty.call(req.body, 'children')) {
+          setFields.children = normaliseRelationshipArray(req.body.children);
+      }
+
+      const result = await collection.updateOne({ id }, { $set: setFields });
 
       if (result.matchedCount === 1) {
           res.json({ message: result.modifiedCount === 1 ? 'Record updated successfully.' : 'Record found; no changes were needed.' });

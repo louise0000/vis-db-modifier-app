@@ -1324,3 +1324,80 @@ nav ul li a:hover {
     font-size: 10px;
     opacity: 0.68;
 }
+
+/* Edit screen: record identity, editable root relationships, and image preview */
+.edit-record-meta,
+.edit-image-preview-panel {
+    width: 75vw;
+    margin-top: 20px;
+    padding: 12px;
+    border: 1px solid #ca00ca44;
+    border-radius: 10px;
+    background: #ffffff88;
+}
+
+.edit-record-meta h4,
+.edit-image-preview-panel h4 {
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.edit-record-meta-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 1fr) minmax(0, 5fr);
+    gap: 10px;
+    align-items: start;
+    padding: 7px 0;
+    border-top: 1px solid #00000014;
+}
+
+.edit-record-meta-row:first-of-type {
+    border-top: none;
+}
+
+.edit-record-meta-row code {
+    display: block;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: #ffffffcc;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+}
+
+.edit-record-relationship-input {
+    width: 100%;
+    min-height: 4.5em;
+    padding: 6px 8px;
+    border: 1px solid #ca00ca44;
+    border-radius: 6px;
+    background: #fff;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    resize: vertical;
+}
+
+.edit-record-relationship-input:focus {
+    outline: 2px solid #ca00ca22;
+    border-color: #ca00ca88;
+}
+
+.edit-image-preview {
+    display: none;
+    max-width: min(420px, 100%);
+    max-height: 420px;
+    margin: 10px 0;
+    border-radius: 8px;
+    object-fit: contain;
+    background: #ffffffaa;
+}
+
+.edit-image-preview-status {
+    margin: 8px 0;
+    font-size: 13px;
+}
+
+.edit-image-preview-link {
+    display: none;
+    margin-top: 6px;
+    font-size: 13px;
+}

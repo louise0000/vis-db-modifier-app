@@ -5,6 +5,56 @@ const baseURL = `${window.location.protocol}//${window.location.host}`;
 // Keeping this explicit helps avoid accidental schema drift during manual edits/imports.
 const ROOT_RELATIONSHIP_FIELDS = new Set(['parentId', 'children']);
 const MULTILINE_INFO_FIELDS = new Set(['note', 'note_jp', 'article']);
+const EDIT_IMAGE_FIELDS = ['imgURL', 'imgUrl', 'imageURL', 'imageUrl', 'image_url', 'image'];
+
+function getFirstImageUrl(info = {}) {
+    for (const key of EDIT_IMAGE_FIELDS) {
+        const value = String(info[key] || '').trim();
+        if (value) return value;
+    }
+    return '';
+}
+
+function getMongoObjectIdHex(value) {
+    if (typeof value === 'string' && /^[a-f0-9]{24}$/i.test(value)) return value;
+    if (value && typeof value === 'object') {
+        const oid = value.$oid || value.oid || value.id;
+        if (typeof oid === 'string' && /^[a-f0-9]{24}$/i.test(oid)) return oid;
+    }
+    return '';
+}
+
+function getRecordAddedDate(record = {}) {
+    const explicitValue = record.createdAt || record.addedAt || record.insertedAt;
+    if (explicitValue) {
+        const explicitDate = new Date(explicitValue);
+        if (!Number.isNaN(explicitDate.getTime())) {
+            return { date: explicitDate, source: 'saved timestamp' };
+        }
+    }
+
+    const objectId = getMongoObjectIdHex(record._id);
+    if (objectId) {
+        const seconds = Number.parseInt(objectId.slice(0, 8), 16);
+        const objectIdDate = new Date(seconds * 1000);
+        if (!Number.isNaN(objectIdDate.getTime())) {
+            return { date: objectIdDate, source: 'MongoDB insertion timestamp' };
+        }
+    }
+
+    return null;
+}
+
+function formatRecordAddedDate(record = {}) {
+    const addedDate = getRecordAddedDate(record);
+    if (!addedDate) return 'Not recorded';
+
+    return addedDate.date.toLocaleDateString('en-GB', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric'
+    });
+}
 
 function ensureJapaneseNoteField(info = {}) {
     const nextInfo = { ...info };
@@ -297,6 +347,123 @@ function appendDraftMetadataList(panel, headingText, fields, className) {
 
 function objectHasDisplayableFields(value) {
     return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length);
+}
+
+function appendReadOnlyRecordMetaRow(container, labelText, value) {
+    const row = document.createElement('div');
+    row.classList.add('edit-record-meta-row');
+
+    const label = document.createElement('strong');
+    label.textContent = labelText;
+
+    const valueElement = document.createElement('code');
+    valueElement.textContent = Array.isArray(value)
+        ? (value.length ? value.join('\n') : 'None')
+        : (String(value || '').trim() || 'None');
+
+    row.appendChild(label);
+    row.appendChild(valueElement);
+    container.appendChild(row);
+}
+
+function appendEditableRelationshipRow(container, labelText, fieldName, values = []) {
+    const row = document.createElement('div');
+    row.classList.add('edit-record-meta-row');
+
+    const label = document.createElement('strong');
+    label.textContent = labelText;
+
+    const input = document.createElement('textarea');
+    input.classList.add('edit-record-relationship-input');
+    input.dataset.relationshipField = fieldName;
+    input.value = Array.isArray(values) ? values.join(', ') : '';
+    input.placeholder = 'Comma-separated record IDs';
+    input.rows = 3;
+
+    row.appendChild(label);
+    row.appendChild(input);
+    container.appendChild(row);
+
+    return input;
+}
+
+function renderEditRecordMetadata(container, record = {}) {
+    const panel = document.createElement('section');
+    panel.classList.add('edit-record-meta');
+
+    const heading = document.createElement('h4');
+    heading.textContent = 'Record Identity & Relationships';
+    panel.appendChild(heading);
+
+    const help = document.createElement('p');
+    help.classList.add('draft-source-help-text');
+    help.textContent = 'Record ID and added date are read-only. Parent and child IDs can be edited directly; this changes only the current record and does not create reciprocal links automatically.';
+    panel.appendChild(help);
+
+    appendReadOnlyRecordMetaRow(panel, 'Record ID', record.id || '');
+    const parentIdInput = appendEditableRelationshipRow(panel, 'Parent IDs', 'parentId', Array.isArray(record.parentId) ? record.parentId : []);
+    const childrenInput = appendEditableRelationshipRow(panel, 'Child IDs', 'children', Array.isArray(record.children) ? record.children : []);
+    appendReadOnlyRecordMetaRow(panel, 'Added to database', formatRecordAddedDate(record));
+
+    container.appendChild(panel);
+    return { parentIdInput, childrenInput };
+}
+
+function renderEditImagePreview(container, info = {}) {
+    const panel = document.createElement('section');
+    panel.classList.add('edit-image-preview-panel');
+
+    const heading = document.createElement('h4');
+    heading.textContent = 'Image Preview';
+    panel.appendChild(heading);
+
+    const image = document.createElement('img');
+    image.classList.add('edit-image-preview');
+    image.alt = 'Record image preview';
+
+    const status = document.createElement('p');
+    status.classList.add('edit-image-preview-status');
+
+    const openLink = document.createElement('a');
+    openLink.classList.add('edit-image-preview-link');
+    openLink.textContent = 'Open image in new tab';
+    openLink.target = '_blank';
+    openLink.rel = 'noopener noreferrer';
+
+    panel.appendChild(image);
+    panel.appendChild(status);
+    panel.appendChild(openLink);
+    container.appendChild(panel);
+
+    const update = (rawUrl = '') => {
+        const url = String(rawUrl || '').trim();
+        image.removeAttribute('src');
+        image.style.display = 'none';
+        openLink.style.display = 'none';
+
+        if (!url) {
+            status.textContent = 'No image URL saved.';
+            return;
+        }
+
+        status.textContent = 'Loading preview…';
+        image.style.display = 'block';
+        image.src = url;
+        openLink.href = url;
+        openLink.style.display = 'inline-block';
+
+        image.onload = () => {
+            status.textContent = '';
+        };
+
+        image.onerror = () => {
+            image.style.display = 'none';
+            status.textContent = 'Preview could not be loaded from this URL.';
+        };
+    };
+
+    update(getFirstImageUrl(info));
+    return { update };
 }
 
 function renderRootSourceMetaPanel(container, sourceMeta = {}) {
@@ -1520,6 +1687,9 @@ async function handleEditRecord(data) {
     const originalInfo = fullRecord.info || data.info || {};
     const ulElement = document.createElement('ul');
 
+    const relationshipEditors = renderEditRecordMetadata(editRecord, fullRecord);
+    const imagePreview = renderEditImagePreview(editRecord, originalInfo);
+
     for (const [key, value] of getInfoEntriesWithJapaneseNote(originalInfo)) {
         const li = document.createElement('li');
 
@@ -1532,6 +1702,12 @@ async function handleEditRecord(data) {
 
         if (MULTILINE_INFO_FIELDS.has(key)) {
             span.classList.add('edit-long-field');
+        }
+
+        if (EDIT_IMAGE_FIELDS.includes(key)) {
+            span.addEventListener('input', () => {
+                imagePreview.update(span.textContent);
+            });
         }
 
         li.appendChild(strong);
@@ -1559,7 +1735,11 @@ async function handleEditRecord(data) {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ info: updatedInfo })
+            body: JSON.stringify({
+                info: updatedInfo,
+                parentId: parseRootArrayField(relationshipEditors.parentIdInput.value),
+                children: parseRootArrayField(relationshipEditors.childrenInput.value)
+            })
         });
 
         const result = await response.json();
