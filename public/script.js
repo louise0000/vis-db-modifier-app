@@ -95,76 +95,11 @@ function appendFormField(container, key, value) {
 }
 
 
-// Draft-record bridge for future capture/import workflows.
+// Draft-record bridge for browser capture/import workflows.
 // Incoming data can prefill the existing Add Single Record form for human review.
 // If the user saves the draft, source metadata is preserved at root-level sourceMeta,
 // not mixed into info.
-const testDraftRecord = {
-    proposedType: 'artworkBook',
-    proposedInfo: {
-        label: 'Test Imported Book',
-        type: 'artworkBook',
-        date: '2026',
-        article: '',
-        note: 'Imported draft note',
-        note_jp: ''
-    },
-    sourceMeta: {
-        source: 'manual-test',
-        capturedAt: new Date().toISOString(),
-        raw: {
-            publisher: 'Imaginary Press',
-            isbn: '000-0-00-000000-0',
-            pages: '321',
-            url: 'https://example.com/test-book'
-        }
-    },
-    duplicateWarnings: []
-};
-
-const draftExampleRecords = {
-    book: testDraftRecord,
-    'wikipedia-person': {
-        proposedType: 'theorist',
-        proposedInfo: {
-            label: 'Test Wikipedia Person',
-            type: 'theorist',
-            birth: '1901',
-            death: '1999',
-            note: 'Imported person draft note from a Wikipedia/Wikidata-style source.',
-            note_jp: ''
-        },
-        sourceMeta: {
-            source: 'wikipedia-person-test',
-            capturedAt: new Date().toISOString(),
-            raw: {
-                title: 'Test Wikipedia Person',
-                wikidataQID: 'Q000000',
-                wikipediaUrl: 'https://en.wikipedia.org/wiki/Test_Wikipedia_Person',
-                description: 'Example biography page used to test person capture.',
-                birth: '1901',
-                death: '1999',
-                imgURL: 'https://example.com/test-person.jpg'
-            }
-        },
-        duplicateWarnings: []
-    }
-};
-
-function getDraftExampleRecord(exampleKey = 'book') {
-    return draftExampleRecords[exampleKey] || draftExampleRecords.book;
-}
-
-function getSelectedDraftExampleKey() {
-    const selector = document.getElementById('draft-example-select');
-    return selector?.value || 'book';
-}
-
-function getExampleDraftJsonText(exampleKey = 'book') {
-    return JSON.stringify(getDraftExampleRecord(exampleKey), null, 2);
-}
-
-function normalisePastedDraftRecord(parsedDraft) {
+function normaliseDraftRecord(parsedDraft) {
     if (!parsedDraft || typeof parsedDraft !== 'object' || Array.isArray(parsedDraft)) {
         throw new Error('Draft JSON must be an object.');
     }
@@ -199,26 +134,6 @@ function normalisePastedDraftRecord(parsedDraft) {
     };
 }
 
-async function loadDraftFromJsonInput() {
-    const input = document.getElementById('draft-json-input');
-    if (!input) return;
-
-    const rawText = input.value.trim();
-    if (!rawText) {
-        alert('Paste draft JSON first.');
-        return;
-    }
-
-    try {
-        const parsed = JSON.parse(rawText);
-        const draftRecord = normalisePastedDraftRecord(parsed);
-        await loadDraftRecordIntoAddForm(draftRecord);
-    } catch (error) {
-        console.error('Error loading pasted draft JSON:', error);
-        alert(`Could not load draft JSON: ${error.message}`);
-    }
-}
-
 function setBrowserCaptureStatus(message, isError = false) {
     const status = document.getElementById('browser-capture-status');
     if (!status) return;
@@ -236,7 +151,7 @@ async function loadLatestBrowserCapture() {
             throw new Error(data.message || data.error || 'No browser capture available.');
         }
 
-        const draftRecord = normalisePastedDraftRecord(data.draftRecord || data.draft || data);
+        const draftRecord = normaliseDraftRecord(data.draftRecord || data.draft || data);
         if (draftRecord.sourceMeta && !draftRecord.sourceMeta.capturedAt && data.receivedAt) {
             draftRecord.sourceMeta.capturedAt = data.receivedAt;
         }
@@ -250,16 +165,27 @@ async function loadLatestBrowserCapture() {
 }
 
 let currentDraftRecord = null;
+let currentDraftTemplateRecord = null;
 let currentDraftSourceFieldMapping = { mappedFields: {}, unmappedFields: {} };
 let currentDraftDuplicateCandidates = [];
 let currentDraftDuplicateReviewAcknowledged = false;
+let currentDraftImageCandidateState = {
+    imageUrl: '',
+    sourceKey: '',
+    status: '',
+    error: '',
+    download: null,
+    cloud: null
+};
 
 
 function clearDraftSourceMetadata() {
     currentDraftRecord = null;
+    currentDraftTemplateRecord = null;
     currentDraftSourceFieldMapping = { mappedFields: {}, unmappedFields: {} };
     currentDraftDuplicateCandidates = [];
     currentDraftDuplicateReviewAcknowledged = false;
+    currentDraftImageCandidateState = { imageUrl: '', sourceKey: '', status: '', error: '', download: null, cloud: null };
     const panel = document.getElementById('draft-source-metadata');
     if (!panel) return;
     panel.innerHTML = '';
@@ -559,6 +485,315 @@ async function runDraftDuplicatePreflight(draftRecord = {}) {
     }
 }
 
+
+function isHttpUrl(value = '') {
+    return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function hasKanji(text = '') {
+    return /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(String(text || ''));
+}
+
+function getPreferredImageSearchLabel(record = {}) {
+    const japaneseLabel = String(record.label_jp || '').trim();
+    if (japaneseLabel && hasKanji(japaneseLabel)) {
+        return japaneseLabel;
+    }
+    return String(record.label || '').trim();
+}
+
+function looksLikeImageSourceKey(key = '') {
+    return /(^|_)(img|image|thumbnail|thumb|photo|picture|poster|cover|ogImage|og:image)(URL|Url|url)?$/i.test(String(key || ''))
+        || /image/i.test(String(key || ''));
+}
+
+function normaliseDraftImageCandidateUrl(value) {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!isHttpUrl(trimmed)) return '';
+    return trimmed;
+}
+
+function findImageUrlInObjectByKeys(object = {}, prefix = '') {
+    if (!object || typeof object !== 'object' || Array.isArray(object)) return null;
+
+    const priorityKeys = [
+        'imgURL', 'imgUrl', 'imageUrl', 'imageURL', 'image_url', 'image',
+        'thumbnailUrl', 'thumbnailURL', 'thumbnail', 'ogImage', 'og:image',
+        'primaryImage', 'coverImage', 'coverUrl', 'cover_url', 'poster', 'photo'
+    ];
+
+    for (const key of priorityKeys) {
+        const url = normaliseDraftImageCandidateUrl(object[key]);
+        if (url) return { imageUrl: url, sourceKey: prefix ? `${prefix}.${key}` : key };
+    }
+
+    for (const [key, value] of Object.entries(object)) {
+        if (!looksLikeImageSourceKey(key)) continue;
+        const url = normaliseDraftImageCandidateUrl(value);
+        if (url) return { imageUrl: url, sourceKey: prefix ? `${prefix}.${key}` : key };
+    }
+
+    return null;
+}
+
+function getDraftImageCandidate(draftRecord = {}) {
+    const candidates = [
+        findImageUrlInObjectByKeys(draftRecord.proposedInfo || {}, 'proposedInfo'),
+        findImageUrlInObjectByKeys(draftRecord.info || {}, 'info'),
+        findImageUrlInObjectByKeys(draftRecord.sourceMeta?.raw || {}, 'sourceMeta.raw'),
+        findImageUrlInObjectByKeys(draftRecord.sourceMeta || {}, 'sourceMeta'),
+        findImageUrlInObjectByKeys(draftRecord.raw || {}, 'raw')
+    ].filter(Boolean);
+
+    return candidates[0] || null;
+}
+
+function getDraftSourcePageUrl(draftRecord = {}) {
+    const raw = draftRecord.sourceMeta?.raw || {};
+    const values = [
+        raw.url,
+        raw.pageUrl,
+        raw.page_url,
+        raw.sourcePageUrl,
+        raw.canonicalUrl,
+        raw.canonical_url,
+        raw.href,
+        draftRecord.sourceMeta?.url,
+        draftRecord.sourceMeta?.sourceUrl
+    ];
+
+    return values.map(value => String(value || '').trim()).find(isHttpUrl) || '';
+}
+
+function resetDraftImageCandidateState(draftRecord = {}) {
+    const candidate = getDraftImageCandidate(draftRecord);
+    if (!candidate?.imageUrl) {
+        currentDraftImageCandidateState = { imageUrl: '', sourceKey: '', status: '', error: '', download: null, cloud: null };
+        return null;
+    }
+
+    if (currentDraftImageCandidateState.imageUrl !== candidate.imageUrl) {
+        currentDraftImageCandidateState = {
+            imageUrl: candidate.imageUrl,
+            sourceKey: candidate.sourceKey || '',
+            status: '',
+            error: '',
+            download: null,
+            cloud: null
+        };
+    } else if (candidate.sourceKey && !currentDraftImageCandidateState.sourceKey) {
+        currentDraftImageCandidateState.sourceKey = candidate.sourceKey;
+    }
+
+    return currentDraftImageCandidateState;
+}
+
+function setDraftFormImageUrl(imageUrl = '') {
+    const form = document.getElementById('new-record-form');
+    const formFields = document.getElementById('form-fields');
+    if (!form || !formFields) return false;
+
+    let imageField = form.querySelector('[name="imgURL"]');
+    if (!imageField) {
+        appendFormField(formFields, 'imgURL', '');
+        imageField = form.querySelector('[name="imgURL"]');
+    }
+
+    if (!imageField) return false;
+    imageField.value = imageUrl;
+    imageField.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+}
+
+function renderDraftImageCandidatePanel(panel, draftRecord = {}) {
+    const state = resetDraftImageCandidateState(draftRecord);
+    if (!state?.imageUrl) return;
+
+    const section = document.createElement('div');
+    section.classList.add('draft-image-candidate-panel');
+
+    const heading = document.createElement('h5');
+    heading.textContent = 'Captured image candidate';
+    section.appendChild(heading);
+
+    const help = document.createElement('p');
+    help.classList.add('draft-source-help-text');
+    help.textContent = 'The browser capture supplied an image URL. Preview it, then upload it to cloud storage and set the ImageKit URL in the new-record form if it looks right.';
+    section.appendChild(help);
+
+    const previewRow = document.createElement('div');
+    previewRow.classList.add('draft-image-candidate-preview-row');
+
+    const previewImage = document.createElement('img');
+    previewImage.src = state.cloud?.imgURL || state.download?.previewUrl || state.imageUrl;
+    previewImage.alt = getDraftProposedLabel(draftRecord) || 'Captured image candidate';
+    previewRow.appendChild(previewImage);
+
+    const details = document.createElement('div');
+
+    const source = document.createElement('p');
+    source.classList.add('draft-source-help-text');
+    source.textContent = `Source field: ${state.sourceKey || 'unknown'}${state.download?.contentType ? ` · ${state.download.contentType}` : ''}`;
+    details.appendChild(source);
+
+    const urlText = document.createElement('p');
+    urlText.classList.add('draft-image-candidate-url-text');
+    urlText.textContent = state.imageUrl;
+    details.appendChild(urlText);
+
+    const status = document.createElement('p');
+    status.classList.add('draft-source-help-text');
+    if (state.status === 'validating') {
+        status.textContent = 'Validating and downloading local preview...';
+    } else if (state.status === 'downloaded') {
+        status.textContent = 'Local preview is ready. You can now upload to cloud storage and set the form imgURL.';
+    } else if (state.status === 'uploading') {
+        status.textContent = 'Uploading to Google Cloud Storage and creating ImageKit URL...';
+    } else if (state.status === 'saved') {
+        status.textContent = 'Cloud image saved and form imgURL set.';
+    } else if (state.status === 'error') {
+        status.classList.add('browser-capture-status-error');
+        status.textContent = `Image preview/save failed: ${state.error || 'Unknown error.'}`;
+    } else {
+        status.textContent = 'Not yet validated. This will not affect the draft unless you choose to save it.';
+    }
+    details.appendChild(status);
+
+    const actions = document.createElement('div');
+    actions.classList.add('draft-image-candidate-actions');
+
+    const validateButton = document.createElement('button');
+    validateButton.type = 'button';
+    validateButton.textContent = state.status === 'validating' ? 'Validating...' : 'Preview / Validate Image';
+    validateButton.disabled = state.status === 'validating' || state.status === 'uploading';
+    validateButton.addEventListener('click', validateDraftImageCandidate);
+    actions.appendChild(validateButton);
+
+    if (state.download?.previewUrl) {
+        const uploadButton = document.createElement('button');
+        uploadButton.type = 'button';
+        uploadButton.textContent = state.status === 'uploading' ? 'Uploading...' : 'Upload to Cloud + Set imgURL';
+        uploadButton.disabled = state.status === 'uploading';
+        uploadButton.addEventListener('click', uploadDraftImageCandidateToCloud);
+        actions.appendChild(uploadButton);
+    }
+
+    if (state.cloud?.imgURL) {
+        const openCloud = document.createElement('a');
+        openCloud.href = state.cloud.imgURL;
+        openCloud.target = '_blank';
+        openCloud.rel = 'noopener noreferrer';
+        openCloud.textContent = 'Open ImageKit URL';
+        actions.appendChild(openCloud);
+    }
+
+    const openOriginal = document.createElement('a');
+    openOriginal.href = state.imageUrl;
+    openOriginal.target = '_blank';
+    openOriginal.rel = 'noopener noreferrer';
+    openOriginal.textContent = 'Open original URL';
+    actions.appendChild(openOriginal);
+
+    details.appendChild(actions);
+    previewRow.appendChild(details);
+    section.appendChild(previewRow);
+    panel.appendChild(section);
+}
+
+function rerenderCurrentDraftMetadata() {
+    if (!currentDraftRecord) return;
+    renderDraftSourceMetadata(currentDraftRecord, currentDraftTemplateRecord || {});
+}
+
+async function validateDraftImageCandidate() {
+    if (!currentDraftRecord || !currentDraftImageCandidateState.imageUrl) return;
+
+    currentDraftImageCandidateState.status = 'validating';
+    currentDraftImageCandidateState.error = '';
+    currentDraftImageCandidateState.download = null;
+    currentDraftImageCandidateState.cloud = null;
+    rerenderCurrentDraftMetadata();
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/image-queue/validate-image-candidate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                imageUrl: currentDraftImageCandidateState.imageUrl,
+                recordId: 'draft',
+                label: getDraftProposedLabel(currentDraftRecord)
+            })
+        });
+
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(payload?.error || `Draft image validation failed with status ${response.status}.`);
+        }
+
+        currentDraftImageCandidateState.download = payload;
+        currentDraftImageCandidateState.status = 'downloaded';
+        currentDraftImageCandidateState.error = '';
+    } catch (error) {
+        console.error('Error validating draft image candidate:', error);
+        currentDraftImageCandidateState.download = null;
+        currentDraftImageCandidateState.status = 'error';
+        currentDraftImageCandidateState.error = error.message || String(error);
+    }
+
+    rerenderCurrentDraftMetadata();
+}
+
+async function uploadDraftImageCandidateToCloud() {
+    if (!currentDraftRecord || !currentDraftImageCandidateState.imageUrl || !currentDraftImageCandidateState.download?.previewUrl) return;
+
+    const confirmed = confirm('Upload this captured image to cloud storage and set the ImageKit URL in the new-record form?');
+    if (!confirmed) return;
+
+    currentDraftImageCandidateState.status = 'uploading';
+    currentDraftImageCandidateState.error = '';
+    rerenderCurrentDraftMetadata();
+
+    try {
+        const raw = currentDraftRecord.sourceMeta?.raw || {};
+        const response = await fetch(`${baseURL}/api/reference/image-queue/upload-local-image-candidate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                label: getDraftProposedLabel(currentDraftRecord),
+                type: currentDraftRecord.proposedType || currentDraftRecord.proposedInfo?.type || '',
+                selectedImageCandidateUrl: currentDraftImageCandidateState.imageUrl,
+                selectedImageCandidateDownload: currentDraftImageCandidateState.download,
+                selectedImageCandidateMeta: {
+                    provider: 'browser-capture',
+                    sourceField: currentDraftImageCandidateState.sourceKey,
+                    sourcePageUrl: getDraftSourcePageUrl(currentDraftRecord),
+                    title: raw.title || currentDraftRecord.proposedInfo?.label || '',
+                    source: currentDraftRecord.sourceMeta?.source || 'browser-capture',
+                    query: ''
+                }
+            })
+        });
+
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(payload?.error || `Draft image cloud upload failed with status ${response.status}.`);
+        }
+
+        currentDraftImageCandidateState.cloud = payload;
+        currentDraftImageCandidateState.status = 'saved';
+        currentDraftImageCandidateState.error = '';
+        setDraftFormImageUrl(payload.imgURL || '');
+    } catch (error) {
+        console.error('Error uploading draft image candidate:', error);
+        currentDraftImageCandidateState.cloud = null;
+        currentDraftImageCandidateState.status = 'error';
+        currentDraftImageCandidateState.error = error.message || String(error);
+    }
+
+    rerenderCurrentDraftMetadata();
+}
+
 function renderDraftSourceMetadata(draftRecord = {}, templateRecord = {}) {
     const panel = document.getElementById('draft-source-metadata');
     if (!panel) return;
@@ -575,9 +810,11 @@ function renderDraftSourceMetadata(draftRecord = {}, templateRecord = {}) {
     // Keep the active draft available until submit so its provenance can be
     // attached to the new root-level record as sourceMeta.
     currentDraftRecord = draftRecord;
+    currentDraftTemplateRecord = templateRecord;
     currentDraftSourceFieldMapping = { mappedFields, unmappedFields };
+    const draftImageCandidate = getDraftImageCandidate(draftRecord);
 
-    if (!Object.keys(mappedFields).length && !Object.keys(unmappedFields).length && !duplicateWarnings.length && !hasSourceMetadata) {
+    if (!Object.keys(mappedFields).length && !Object.keys(unmappedFields).length && !duplicateWarnings.length && !hasSourceMetadata && !draftImageCandidate) {
         clearDraftSourceMetadata();
         return;
     }
@@ -602,6 +839,7 @@ function renderDraftSourceMetadata(draftRecord = {}, templateRecord = {}) {
 
     appendDraftMetadataList(panel, 'Mapped into editable form', mappedFields, 'draft-source-mapped-list');
     appendDraftMetadataList(panel, 'Unmapped source fields', unmappedFields, 'draft-source-unmapped-list');
+    renderDraftImageCandidatePanel(panel, draftRecord);
 
     if (duplicateWarnings.length) {
         const warningHeading = document.createElement('h5');
@@ -659,7 +897,7 @@ function createPersistableDraftSourceMeta(draftRecord = {}, savedInfo = {}) {
         return null;
     }
 
-    return {
+    const persistable = {
         source: sourceMeta.source || 'unknown-draft-source',
         capturedAt: sourceMeta.capturedAt || '',
         acceptedAt: new Date().toISOString(),
@@ -669,6 +907,12 @@ function createPersistableDraftSourceMeta(draftRecord = {}, savedInfo = {}) {
         raw,
         note: 'Captured through modifier draft-record prefill bridge. Mapped fields were saved into info; unmapped fields are preserved here for provenance/review.'
     };
+
+    if (currentDraftImageCandidateState.cloud?.imageSource) {
+        persistable.imageSource = currentDraftImageCandidateState.cloud.imageSource;
+    }
+
+    return persistable;
 }
 
 
@@ -1460,49 +1704,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    const loadTestDraftButton = document.getElementById('load-test-draft');
-    if (loadTestDraftButton) {
-        loadTestDraftButton.addEventListener('click', () => {
-            loadDraftRecordIntoAddForm(testDraftRecord);
-        });
-    }
-
-    const draftJsonLoader = document.getElementById('draft-json-loader');
-    const draftJsonInput = document.getElementById('draft-json-input');
-    const toggleDraftJsonLoaderButton = document.getElementById('toggle-draft-json-loader');
-    const loadPastedDraftButton = document.getElementById('load-pasted-draft');
-    const fillExampleDraftJsonButton = document.getElementById('fill-example-draft-json');
-    const clearDraftJsonButton = document.getElementById('clear-draft-json');
     const loadLatestBrowserCaptureButton = document.getElementById('load-latest-browser-capture');
 
     if (loadLatestBrowserCaptureButton) {
         loadLatestBrowserCaptureButton.addEventListener('click', () => {
             loadLatestBrowserCapture();
-        });
-    }
-
-    if (toggleDraftJsonLoaderButton && draftJsonLoader) {
-        toggleDraftJsonLoaderButton.addEventListener('click', () => {
-            const isHidden = draftJsonLoader.style.display === 'none' || !draftJsonLoader.style.display;
-            draftJsonLoader.style.display = isHidden ? 'block' : 'none';
-        });
-    }
-
-    if (loadPastedDraftButton) {
-        loadPastedDraftButton.addEventListener('click', () => {
-            loadDraftFromJsonInput();
-        });
-    }
-
-    if (fillExampleDraftJsonButton && draftJsonInput) {
-        fillExampleDraftJsonButton.addEventListener('click', () => {
-            draftJsonInput.value = getExampleDraftJsonText(getSelectedDraftExampleKey());
-        });
-    }
-
-    if (clearDraftJsonButton && draftJsonInput) {
-        clearDraftJsonButton.addEventListener('click', () => {
-            draftJsonInput.value = '';
         });
     }
 
@@ -2792,7 +2998,8 @@ function formatImageQueueMeta(record) {
 }
 
 function buildImageSearchQuery(record) {
-    const label = record.label || '';
+    const label = getPreferredImageSearchLabel(record);
+    const usingJapaneseLabel = Boolean(record.label_jp && label === record.label_jp && hasKanji(record.label_jp));
     const datePart = (record.type === 'theorist' || record.type === 'artist')
         ? [record.birth, record.death].filter(Boolean).join(' ')
         : record.date;
@@ -2809,9 +3016,15 @@ function buildImageSearchQuery(record) {
     ].filter(Boolean).join(' ').toLowerCase();
 
     const looksLikePublication = /\b(book|publication|catalogue|catalog|journal|article|essay|text|monograph|chapter|volume)\b/.test(classificationText);
-    const hint = (record.type === 'theorist' || record.type === 'artist')
+    let hint = (record.type === 'theorist' || record.type === 'artist')
         ? 'portrait'
         : (record.type === 'artworkBook' ? (looksLikePublication ? 'cover image' : 'artwork image') : 'image');
+
+    if (usingJapaneseLabel) {
+        hint = (record.type === 'theorist' || record.type === 'artist')
+            ? '肖像'
+            : (record.type === 'artworkBook' ? (looksLikePublication ? '表紙' : '作品画像') : '画像');
+    }
 
     return [label, datePart, hint].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 }
@@ -3387,7 +3600,9 @@ function renderImageQueue() {
 
         const query = document.createElement('div');
         query.classList.add('image-queue-card-meta');
-        query.textContent = `SerpApi query: ${buildImageSearchQuery(record)}`;
+        const preferredSearchLabel = getPreferredImageSearchLabel(record);
+        const labelSource = preferredSearchLabel === record.label_jp && hasKanji(record.label_jp) ? 'JP label' : 'base label';
+        query.textContent = `SerpApi query (${labelSource}): ${buildImageSearchQuery(record)}`;
         details.appendChild(query);
 
         details.appendChild(renderImageCandidateReview(record));

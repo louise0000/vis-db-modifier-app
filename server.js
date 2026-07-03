@@ -1904,6 +1904,112 @@ app.get('/api/reference/image-queue/cloud-config', (req, res) => {
   });
 });
 
+
+// Upload a previously validated local image candidate to Google Cloud Storage
+// without writing to MongoDB. This is used by the Add Single Record/browser-capture
+// flow, where the record does not exist yet: the returned ImageKit URL is written
+// into the form and saved with the new record later.
+app.post('/api/reference/image-queue/upload-local-image-candidate', async (req, res) => {
+  try {
+    const selectedImageCandidateUrl = String(req.body?.selectedImageCandidateUrl || '').trim();
+    const selectedDownload = req.body?.selectedImageCandidateDownload || {};
+    const selectedMeta = req.body?.selectedImageCandidateMeta && typeof req.body.selectedImageCandidateMeta === 'object'
+      ? req.body.selectedImageCandidateMeta
+      : {};
+    const previewUrl = String(selectedDownload?.previewUrl || '').trim();
+    const label = String(req.body?.label || 'draft-image').trim() || 'draft-image';
+    const type = String(req.body?.type || 'draft').trim() || 'draft';
+
+    if (!selectedImageCandidateUrl) {
+      return res.status(400).json({ error: 'selectedImageCandidateUrl is required.' });
+    }
+
+    const config = getImageQueueCloudConfigStatus();
+    if (!config.hasGoogleStoragePackage) {
+      return res.status(503).json({ error: 'Google Cloud Storage package is not installed. Run: npm install @google-cloud/storage' });
+    }
+
+    if (!config.hasBucket) {
+      return res.status(503).json({ error: 'Set GCS_IMAGE_BUCKET or GCS_BUCKET_NAME in .env before uploading images.' });
+    }
+
+    if (!config.hasImageKitEndpoint) {
+      return res.status(503).json({ error: 'Set IMAGEKIT_URL_ENDPOINT in .env before saving an ImageKit delivery URL.' });
+    }
+
+    const localPreview = getLocalImageCandidatePreviewPath(previewUrl);
+    if (!localPreview) {
+      return res.status(400).json({ error: 'selectedImageCandidateDownload.previewUrl must point to a local _image-candidate-preview file.' });
+    }
+
+    try {
+      await fsp.access(localPreview.filePath, fs.constants.R_OK);
+    } catch (err) {
+      return res.status(404).json({ error: 'Local preview file was not found. Validate/download the image again before uploading.' });
+    }
+
+    const ext = path.extname(localPreview.filename).replace(/^\./, '') || 'jpg';
+    const objectName = safeJoinUrlParts(
+      config.gcsImagePrefix,
+      type,
+      `${slugifyImageCandidateLabel(label)}-${uuidv4()}.${ext}`
+    );
+
+    const storage = new GoogleCloudStorage();
+    const bucket = storage.bucket(config.bucket);
+    const contentType = String(selectedDownload?.contentType || '').trim() || undefined;
+
+    await bucket.upload(localPreview.filePath, {
+      destination: objectName,
+      metadata: {
+        contentType,
+        metadata: {
+          sourceUrl: selectedImageCandidateUrl,
+          recordLabel: label,
+          draftUpload: 'true'
+        }
+      }
+    });
+
+    const deliveryUrl = buildImageKitDeliveryUrl(objectName);
+    const savedAt = new Date().toISOString();
+    const imageSource = {
+      method: selectedMeta?.provider === 'browser-capture'
+        ? 'browser-capture-image-candidate'
+        : 'local-image-candidate-upload',
+      provider: selectedMeta?.provider || 'manual',
+      selectedAt: savedAt,
+      originalImageUrl: selectedImageCandidateUrl,
+      downloadedFinalUrl: selectedDownload?.finalUrl || selectedImageCandidateUrl,
+      sourcePageUrl: selectedMeta?.sourcePageUrl || '',
+      source: selectedMeta?.source || '',
+      title: selectedMeta?.title || '',
+      searchQuery: selectedMeta?.query || '',
+      thumbnailUrl: selectedMeta?.thumbnailUrl || '',
+      sourceField: selectedMeta?.sourceField || '',
+      originalWidth: selectedMeta?.originalWidth || null,
+      originalHeight: selectedMeta?.originalHeight || null,
+      localPreviewUrl: previewUrl,
+      gcsBucket: config.bucket,
+      gcsObjectName: objectName,
+      imageKitUrl: deliveryUrl,
+      contentType: contentType || '',
+      sizeBytes: selectedDownload?.sizeBytes || null
+    };
+
+    res.json({
+      success: true,
+      imgURL: deliveryUrl,
+      gcsBucket: config.bucket,
+      gcsObjectName: objectName,
+      imageSource
+    });
+  } catch (err) {
+    console.error('Error uploading local image candidate:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
 // Upload a previously validated local image candidate to Google Cloud Storage,
 // construct the corresponding ImageKit delivery URL, and save it as info.imgURL.
 app.post('/api/reference/image-queue/finalise-image-candidate', async (req, res) => {
