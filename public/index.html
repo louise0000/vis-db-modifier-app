@@ -12,7 +12,7 @@
   <!-- Navigation Bar -->
   <nav>
     <ul>
-      <li><a href="#section-1">Connect People to Works</a></li>
+      <li><a href="#section-1">Connect Records</a></li>
       <li><a href="#section-2">Duplicates</a></li>
       <li><a href="#section-3">Search and Edit Records</a></li>
       <li><a href="#section-4">Add Single Record</a></li>
@@ -26,27 +26,28 @@
   <div class="content-wrapper">
     <!-- Section 1: Existing Interface -->
     <div id="section-1" class="content-section">
+      <p>Choose one parent and one or more children. This connector writes both sides of the relationship.</p>
       <div class="search-sections-wrapper">
-        <!-- Theorist or Artist Search Section -->
+        <!-- Parent record search -->
         <div class="search-section theorist-section">
-          <h3>Search Theorist or Artist</h3>
-          <input type="text" id="query-theorist-artist" placeholder="Enter Label">
+          <h3>Search Parent Record</h3>
+          <input type="text" id="query-theorist-artist" placeholder="Search label, Japanese label or ID">
           <button id="query-button-theorist-artist">Query</button>
           <pre id="result-theorist-artist"></pre>
         </div>
     
-        <!-- ArtworkBook Search Section -->
+        <!-- Child record search -->
         <div class="search-section artwork-section">
-          <h3>Search ArtworkBook</h3>
-          <input type="text" id="query-artworkbook" placeholder="Enter Label">
+          <h3>Search Child Records</h3>
+          <input type="text" id="query-artworkbook" placeholder="Search label, Japanese label or ID">
           <button id="query-button-artworkbook">Query</button>
-          <button id="query-button-orphans">Search for All Orphans</button>
+          <button id="query-button-orphans">Show Parentless ArtworkBooks</button>
           <pre id="result-artworkbook"></pre>
         </div>
       </div>
     
       <!-- Confirm Selection Button -->
-      <button id="confirm-selection">Confirm Selection</button>
+      <button id="confirm-selection">Connect Selected Records</button>
     </div>
     
 

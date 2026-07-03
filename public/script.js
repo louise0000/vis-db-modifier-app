@@ -1221,85 +1221,82 @@ async function isGhost(parentLabel) {
     return !result.exists;
 }
 
-// Search 1: Theorist or Artist
+// Search 1: any record can be selected as the parent.
 document.getElementById('query-button-theorist-artist').addEventListener('click', async () => {
-    const label = document.getElementById('query-theorist-artist').value.trim(); // Trim whitespace
+    const label = document.getElementById('query-theorist-artist').value.trim();
     if (!label) {
-      alert('Please enter a search term.');
-      return;
+        alert('Please enter a search term.');
+        return;
     }
-    
-    const baseURL = `${window.location.protocol}//${window.location.host}`;
-    const response = await fetch(`${baseURL}/api/reference/label/theorist-artist/${encodeURIComponent(label)}`);
+
+    const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(label)}`);
     const data = await response.json();
-    renderResults(data, 'result-theorist-artist', false); // Single selection
-  });
-  
-  // Search 2: ArtworkBook
-  document.getElementById('query-button-artworkbook').addEventListener('click', async () => {
-    const label = document.getElementById('query-artworkbook').value.trim(); // Trim whitespace
+    renderResults(data, 'result-theorist-artist', false); // One parent.
+});
+
+// Search 2: any records can be selected as children.
+document.getElementById('query-button-artworkbook').addEventListener('click', async () => {
+    const label = document.getElementById('query-artworkbook').value.trim();
     if (!label) {
-      alert('Please enter a search term.');
-      return;
+        alert('Please enter a search term.');
+        return;
     }
-    
-    const baseURL = `${window.location.protocol}//${window.location.host}`;
-    const response = await fetch(`${baseURL}/api/reference/label/artworkbook/${encodeURIComponent(label)}`);
+
+    const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(label)}`);
     const data = await response.json();
-    renderResults(data, 'result-artworkbook', true); // Multiple selection
-  });
-  
-  // Search for All Orphans
+    renderResults(data, 'result-artworkbook', true); // One-to-many child selection.
+});
+
+// Convenience search retained for the existing artworkBook orphan workflow.
 document.getElementById('query-button-orphans').addEventListener('click', async () => {
-    const baseURL = `${window.location.protocol}//${window.location.host}`;
     const response = await fetch(`${baseURL}/api/reference/orphans`);
     const data = await response.json();
     renderResults(data, 'result-artworkbook', true);
-  });
+});
 
-// Function to capture selections and trigger the database update
+// Create reciprocal durable relationships: parent.children and child.parentId.
 document.getElementById('confirm-selection').addEventListener('click', async () => {
-    const selectedTheoristArtist = document.querySelector('#result-theorist-artist .custom-option.selected');
-    const selectedArtworkBooks = document.querySelectorAll('#result-artworkbook .custom-option.selected');
-  
-    if (selectedTheoristArtist && selectedArtworkBooks.length > 0) {
-        const parentId = selectedTheoristArtist.dataset.id; // Get the id of the selected theorist/artist
-        const artworkIds = Array.from(selectedArtworkBooks).map(artwork => artwork.dataset.id); // Get the ids of the selected artworkBooks
-        
-        // Log the captured IDs for debugging
-        console.log("Parent ID:", parentId);
-        console.log("Artwork IDs:", artworkIds);
+    const selectedParent = document.querySelector('#result-theorist-artist .custom-option.selected');
+    const selectedChildren = document.querySelectorAll('#result-artworkbook .custom-option.selected');
 
-        if (!parentId || artworkIds.includes(undefined)) {
-            alert('There was an error capturing the selected IDs. Please try again.');
-            return;
+    if (!selectedParent || selectedChildren.length === 0) {
+        alert('Please select one parent record and one or more child records.');
+        return;
+    }
+
+    const parentId = selectedParent.dataset.id;
+    const childIds = [...new Set(
+        Array.from(selectedChildren)
+            .map(child => child.dataset.id)
+            .filter(Boolean)
+    )];
+
+    if (!parentId || childIds.length === 0) {
+        alert('There was an error capturing the selected IDs. Please try again.');
+        return;
+    }
+
+    if (childIds.includes(parentId)) {
+        alert('A record cannot be connected as its own child.');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/connect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ parentId, childIds })
+        });
+
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.message || result.error || 'Relationship update failed.');
         }
-  
-        // Update parentId in selected artworkBook records
-        const parentUpdateResponse = await fetch(`${window.location.protocol}//${window.location.host}/api/reference/add-parent`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ parentId, artworkIds })
-        });
-  
-        // Update children in selected theorist/artist record
-        const childrenUpdateResponse = await fetch(`${window.location.protocol}//${window.location.host}/api/reference/add-children`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ parentId, childrenIds: artworkIds })
-        });
-  
-        // Log the responses to debug
-        console.log('Parent Update Response:', await parentUpdateResponse.json());
-        console.log('Children Update Response:', await childrenUpdateResponse.json());
-  
-        alert('Relationships updated successfully!');
-    } else {
-        alert('Please select both a theorist/artist and one or more artworkBooks.');
+
+        alert(`Connected ${childIds.length} child record${childIds.length === 1 ? '' : 's'} to the selected parent.`);
+    } catch (error) {
+        console.error('Error connecting records:', error);
+        alert(error.message || 'There was an error connecting the selected records.');
     }
 });
 

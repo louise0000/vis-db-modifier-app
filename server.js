@@ -426,6 +426,77 @@ app.get('/api/reference/orphans', async (req, res) => {
   }
 });
 
+// General reciprocal relationship connector.
+// Any record type may be the parent and any record type may be a child.
+// This is intentionally reciprocal, unlike direct relationship-array editing in the edit screen.
+app.post('/api/reference/connect', async (req, res) => {
+  try {
+    const collection = db.collection('reference');
+    const parentId = typeof req.body?.parentId === 'string' ? req.body.parentId.trim() : '';
+    const childIds = [...new Set(
+      (Array.isArray(req.body?.childIds) ? req.body.childIds : [])
+        .filter(id => typeof id === 'string')
+        .map(id => id.trim())
+        .filter(Boolean)
+    )];
+
+    if (!parentId) {
+      return res.status(400).json({ message: 'A parentId is required.' });
+    }
+
+    if (childIds.length === 0) {
+      return res.status(400).json({ message: 'At least one childId is required.' });
+    }
+
+    if (childIds.includes(parentId)) {
+      return res.status(400).json({ message: 'A record cannot be connected as its own child.' });
+    }
+
+    // Validate the whole selection before writing anything.
+    const requestedIds = [parentId, ...childIds];
+    const existingRecords = await collection.find(
+      { id: { $in: requestedIds } },
+      { projection: { id: 1 } }
+    ).toArray();
+    const existingIds = new Set(existingRecords.map(record => record.id));
+
+    if (!existingIds.has(parentId)) {
+      return res.status(404).json({ message: 'Selected parent record was not found.' });
+    }
+
+    const missingChildIds = childIds.filter(id => !existingIds.has(id));
+    if (missingChildIds.length > 0) {
+      return res.status(400).json({
+        message: 'One or more selected child records were not found.',
+        missingChildIds
+      });
+    }
+
+    const childUpdate = await collection.updateMany(
+      { id: { $in: childIds } },
+      { $addToSet: { parentId } }
+    );
+
+    const parentUpdate = await collection.updateOne(
+      { id: parentId },
+      { $addToSet: { children: { $each: childIds } } }
+    );
+
+    res.json({
+      success: true,
+      parentId,
+      childIds,
+      childrenMatched: childUpdate.matchedCount,
+      childrenModified: childUpdate.modifiedCount,
+      parentMatched: parentUpdate.matchedCount,
+      parentModified: parentUpdate.modifiedCount
+    });
+  } catch (err) {
+    console.error('Error connecting reference records:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
 // Endpoint to add theorist/artist ID to parentId of selected artworkBook items
 app.post('/api/reference/add-parent', async (req, res) => {
   try {
