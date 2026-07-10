@@ -3125,8 +3125,33 @@ if (window.location.hash && document.querySelector(window.location.hash)) {
 // ========== Image queue scaffold ==========
 // This is the first non-destructive image workflow step: queue records and build
 // search queries. It does not scrape, download, upload, or write image data yet.
-const IMAGE_QUEUE_LIMIT = 5;
+const IMAGE_QUEUE_MANUAL_LIMIT = 5;
+const IMAGE_QUEUE_BATCH_LIMIT = 50;
 const imageQueueRecords = [];
+let imageQueueMode = 'manual';
+
+function getImageQueueLimit() {
+    return imageQueueMode === 'batch' ? IMAGE_QUEUE_BATCH_LIMIT : IMAGE_QUEUE_MANUAL_LIMIT;
+}
+
+function getImageQueueModeLabel() {
+    return imageQueueMode === 'batch' ? 'batch mode' : 'manual mode';
+}
+
+function setImageQueueMode(mode) {
+    imageQueueMode = mode === 'batch' ? 'batch' : 'manual';
+}
+
+function resetImageQueueModeIfEmpty() {
+    if (!imageQueueRecords.length) {
+        setImageQueueMode('manual');
+    }
+}
+
+function getImageQueueAvailableSlots() {
+    return Math.max(0, getImageQueueLimit() - imageQueueRecords.length);
+}
+
 
 function getImageQueueRecordId(record) {
     return record?.id || record?.info?.id || '';
@@ -3298,6 +3323,11 @@ async function fetchSerpApiImageCandidatesForQueue() {
     if (!imageQueueRecords.length) {
         alert('Queue records before fetching image candidates.');
         return;
+    }
+
+    if (imageQueueRecords.length > IMAGE_QUEUE_MANUAL_LIMIT) {
+        const confirmed = confirm(`Fetch SerpApi candidates for ${imageQueueRecords.length} queued records? This runs sequentially and may take a while.`);
+        if (!confirmed) return;
     }
 
     for (const record of imageQueueRecords) {
@@ -3714,10 +3744,18 @@ function renderImageQueue() {
     const preview = document.getElementById('image-query-preview');
     const saveSelectedButton = document.getElementById('image-queue-save-selected');
     const fetchSerpApiButton = document.getElementById('image-queue-fetch-serpapi');
+    const helpText = document.getElementById('image-queue-help-text');
 
     if (!list || !count) return;
 
-    count.textContent = `${imageQueueRecords.length} / ${IMAGE_QUEUE_LIMIT} queued`;
+    const queueLimit = getImageQueueLimit();
+    count.textContent = `${imageQueueRecords.length} / ${queueLimit} queued · ${getImageQueueModeLabel()}`;
+
+    if (helpText) {
+        helpText.textContent = imageQueueMode === 'batch'
+            ? `Batch mode allows up to ${IMAGE_QUEUE_BATCH_LIMIT} queued records. Fetching runs one record at a time, so large batches can take a while; remove anything you do not want before requesting candidates.`
+            : `Manual queue mode is capped at ${IMAGE_QUEUE_MANUAL_LIMIT} records for careful review. Batch Records can send a larger controlled set when needed.`;
+    }
 
     if (saveSelectedButton) {
         const selectedCount = imageQueueRecords.filter(record => record.selectedImageCandidateUrl && record.imageCandidateCloudStatus !== 'saved').length;
@@ -3827,6 +3865,7 @@ function renderImageQueue() {
         removeButton.addEventListener('click', () => {
             const index = imageQueueRecords.findIndex(item => item.id === record.id);
             if (index !== -1) imageQueueRecords.splice(index, 1);
+            resetImageQueueModeIfEmpty();
             renderImageQueue();
         });
         card.appendChild(removeButton);
@@ -3835,7 +3874,11 @@ function renderImageQueue() {
     });
 }
 
-function addRecordToImageQueue(record) {
+function addRecordToImageQueue(record, options = {}) {
+    if (options.source === 'batch') {
+        setImageQueueMode('batch');
+    }
+
     const normalisedRecord = normaliseImageQueueRecord(record);
     if (!normalisedRecord.id) {
         alert('This record does not have an id, so it cannot be queued safely.');
@@ -3847,8 +3890,9 @@ function addRecordToImageQueue(record) {
         return;
     }
 
-    if (imageQueueRecords.length >= IMAGE_QUEUE_LIMIT) {
-        alert(`The image queue is limited to ${IMAGE_QUEUE_LIMIT} records.`);
+    const queueLimit = getImageQueueLimit();
+    if (imageQueueRecords.length >= queueLimit) {
+        alert(`The image queue is limited to ${queueLimit} records in ${getImageQueueModeLabel()}.`);
         return;
     }
 
@@ -3902,12 +3946,13 @@ async function searchRecordsForImageQueue() {
 }
 
 async function fillImageQueueWithRandomPeopleWithoutImages() {
-    if (imageQueueRecords.length >= IMAGE_QUEUE_LIMIT) {
-        alert(`The image queue is already full (${IMAGE_QUEUE_LIMIT} records).`);
+    const queueLimit = getImageQueueLimit();
+    if (imageQueueRecords.length >= queueLimit) {
+        alert(`The image queue is already full (${queueLimit} records in ${getImageQueueModeLabel()}).`);
         return;
     }
 
-    const remainingSlots = IMAGE_QUEUE_LIMIT - imageQueueRecords.length;
+    const remainingSlots = queueLimit - imageQueueRecords.length;
     const excludedIds = imageQueueRecords.map(record => record.id).filter(Boolean).join(',');
     const url = `${baseURL}/api/reference/image-queue/random-missing-images?limit=${remainingSlots}&types=artist,theorist&exclude=${encodeURIComponent(excludedIds)}`;
 
@@ -3955,6 +4000,7 @@ function initialiseImageQueueScaffold() {
     if (clearButton) {
         clearButton.addEventListener('click', () => {
             imageQueueRecords.splice(0, imageQueueRecords.length);
+            resetImageQueueModeIfEmpty();
             renderImageQueue();
         });
     }
@@ -3983,7 +4029,7 @@ initialiseImageQueueScaffold();
 // -----------------------------------------------------------------------------
 // This screen now has two safe layers:
 // 1. editable single-record rows, saved one at a time through the normal update route;
-// 2. a repeated parent-add operation that must be previewed before commit.
+// 2. repeated relationship / field operations that must be previewed before commit.
 const BATCH_REFERENCE_SOURCE = 'reference';
 const BATCH_CURATION_SOURCE = 'curation';
 
@@ -3993,9 +4039,21 @@ const batchRecordsState = {
     records: [],
     selectedIds: new Set(),
     expandedIds: new Set(),
+    pendingEdits: new Map(),
     resolvedParent: null,
-    previewRows: []
+    previewRows: [],
+    fieldPreviewRows: []
 };
+
+const BATCH_APPLY_INFO_FIELDS = new Set([
+    'type',
+    'birth',
+    'death',
+    'date',
+    'imgURL',
+    'note',
+    'note_jp'
+]);
 
 function getBatchRecordInfo(record = {}) {
     return record.info || record || {};
@@ -4051,6 +4109,72 @@ function getBatchSelectedRecords() {
     return batchRecordsState.records.filter(record => batchRecordsState.selectedIds.has(getBatchRecordId(record)));
 }
 
+function getBatchSelectedMissingImageRecords() {
+    return getBatchSelectedRecords().filter(record => !getBatchRecordImageUrl(record));
+}
+
+function getBatchRelationshipOperation() {
+    const operation = document.getElementById('batch-operation-select')?.value || 'add-parent';
+    return operation === 'add-child' ? 'add-child' : 'add-parent';
+}
+
+function getBatchRelationshipOperationConfig(operation = getBatchRelationshipOperation()) {
+    if (operation === 'add-child') {
+        return {
+            operation: 'add-child',
+            relatedRole: 'child',
+            selectedField: 'children',
+            selectedLabel: 'child',
+            reciprocalField: 'parentId',
+            reciprocalLabel: 'parent',
+            endpoint: '/api/reference/batch-records/add-child',
+            bodyKey: 'childId',
+            previewAction: 'Would add child',
+            alreadyPresentAction: 'No change',
+            selfSkipAction: 'Skipped: self-child',
+            previewButtonLabel: 'Preview Child Add',
+            commitButtonLabel: 'Commit Reviewed Child Add',
+            resolveButtonLabel: 'Resolve Child',
+            inputPlaceholder: 'Paste child ID, or type a child label and resolve'
+        };
+    }
+
+    return {
+        operation: 'add-parent',
+        relatedRole: 'parent',
+        selectedField: 'parentId',
+        selectedLabel: 'parent',
+        reciprocalField: 'children',
+        reciprocalLabel: 'child',
+        endpoint: '/api/reference/batch-records/add-parent',
+        bodyKey: 'parentId',
+        previewAction: 'Would add parent',
+        alreadyPresentAction: 'No change',
+        selfSkipAction: 'Skipped: self-parent',
+        previewButtonLabel: 'Preview Parent Add',
+        commitButtonLabel: 'Commit Reviewed Parent Add',
+        resolveButtonLabel: 'Resolve Parent',
+        inputPlaceholder: "Paste Guattari's ID, or type Guattari and resolve"
+    };
+}
+
+function getBatchRelationshipIds(record = {}, field = 'parentId') {
+    return field === 'children' ? getBatchRecordChildIds(record) : getBatchRecordParentIds(record);
+}
+
+function syncBatchOperationLabels() {
+    const config = getBatchRelationshipOperationConfig();
+    const resolveButton = document.getElementById('batch-resolve-parent-button');
+    const previewButton = document.getElementById('batch-preview-operation-button');
+    const commitButton = document.getElementById('batch-commit-operation-button');
+    const input = document.getElementById('batch-parent-input');
+
+    if (resolveButton) resolveButton.textContent = config.resolveButtonLabel;
+    if (previewButton) previewButton.textContent = config.previewButtonLabel;
+    if (commitButton) commitButton.textContent = config.commitButtonLabel;
+    if (input) input.placeholder = config.inputPlaceholder;
+}
+
 function setBatchClusterStatus(message = '') {
     const status = document.getElementById('batch-cluster-status');
     if (status) status.textContent = message;
@@ -4064,6 +4188,12 @@ function updateBatchSelectionControls() {
     const clearSelection = document.getElementById('batch-clear-selection');
     const previewButton = document.getElementById('batch-preview-operation-button');
     const commitButton = document.getElementById('batch-commit-operation-button');
+    const expandAll = document.getElementById('batch-expand-all');
+    const collapseAll = document.getElementById('batch-collapse-all');
+    const saveDirty = document.getElementById('batch-save-dirty-records');
+    const fieldPreviewButton = document.getElementById('batch-preview-field-apply');
+    const fieldCommitButton = document.getElementById('batch-commit-field-apply');
+    const sendImageQueueButton = document.getElementById('batch-send-selected-image-queue');
 
     if (count) {
         count.textContent = totalCount
@@ -4073,9 +4203,25 @@ function updateBatchSelectionControls() {
 
     if (selectAll) selectAll.disabled = totalCount === 0 || selectedCount === totalCount;
     if (clearSelection) clearSelection.disabled = selectedCount === 0;
+    if (expandAll) expandAll.disabled = totalCount === 0 || batchRecordsState.expandedIds.size === totalCount;
+    if (collapseAll) collapseAll.disabled = totalCount === 0 || batchRecordsState.expandedIds.size === 0;
+    if (saveDirty) {
+        const dirtyCount = batchRecordsState.pendingEdits.size;
+        saveDirty.disabled = dirtyCount === 0;
+        saveDirty.textContent = dirtyCount ? `Save Edited Rows (${dirtyCount})` : 'Save Edited Rows';
+    }
+    if (fieldPreviewButton) fieldPreviewButton.disabled = selectedCount === 0;
+    if (fieldCommitButton) fieldCommitButton.disabled = batchRecordsState.fieldPreviewRows.filter(row => row && row.changed).length === 0;
+    if (sendImageQueueButton) {
+        const missingImageSelectedCount = getBatchSelectedMissingImageRecords().length;
+        sendImageQueueButton.disabled = missingImageSelectedCount === 0;
+        sendImageQueueButton.textContent = missingImageSelectedCount
+            ? `Send Missing Images to Queue (${missingImageSelectedCount})`
+            : 'Send Missing Images to Queue';
+    }
     if (previewButton) previewButton.disabled = selectedCount === 0 || !batchRecordsState.resolvedParent;
     if (commitButton) {
-        const changedRows = batchRecordsState.previewRows.filter(row => row && !row.alreadyPresent && !row.isSelfParent);
+        const changedRows = batchRecordsState.previewRows.filter(row => row && !row.alreadyPresent && !row.isSelfRelationship);
         commitButton.disabled = changedRows.length === 0 || !batchRecordsState.resolvedParent;
     }
 }
@@ -4083,6 +4229,13 @@ function updateBatchSelectionControls() {
 function clearBatchOperationPreview() {
     batchRecordsState.previewRows = [];
     const preview = document.getElementById('batch-operation-preview');
+    if (preview) preview.innerHTML = '';
+    updateBatchSelectionControls();
+}
+
+function clearBatchFieldApplyPreview() {
+    batchRecordsState.fieldPreviewRows = [];
+    const preview = document.getElementById('batch-field-apply-preview');
     if (preview) preview.innerHTML = '';
     updateBatchSelectionControls();
 }
@@ -4121,7 +4274,13 @@ function syncBatchSourceControls() {
     }
 
     referenceOnlyControls.forEach(control => {
-        control.classList.toggle('batch-control-disabled', source === BATCH_CURATION_SOURCE);
+        const disabled = source === BATCH_CURATION_SOURCE;
+        control.classList.toggle('batch-control-disabled', disabled);
+        control.querySelectorAll('input, select, button').forEach(field => {
+            field.disabled = disabled;
+            field.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+        });
+        control.title = disabled ? 'Reference-root scope controls do not apply when loading records from a saved curation.' : '';
     });
 }
 
@@ -4130,8 +4289,10 @@ function resetBatchRootSelection() {
     batchRecordsState.records = [];
     batchRecordsState.selectedIds.clear();
     batchRecordsState.expandedIds.clear();
+    batchRecordsState.pendingEdits.clear();
     batchRecordsState.resolvedParent = null;
     clearBatchOperationPreview();
+    clearBatchFieldApplyPreview();
     renderBatchSelectedRoot();
     renderBatchRecordsList();
     renderResolvedBatchParent(null);
@@ -4193,6 +4354,8 @@ function renderBatchRootResults(data = []) {
             batchRecordsState.records = [];
             batchRecordsState.selectedIds.clear();
             batchRecordsState.expandedIds.clear();
+            batchRecordsState.pendingEdits.clear();
+            clearBatchFieldApplyPreview();
             document.querySelectorAll('.batch-root-result-button').forEach(result => result.classList.remove('is-selected'));
             button.classList.add('is-selected');
             renderBatchSelectedRoot();
@@ -4271,7 +4434,9 @@ async function loadBatchRecordCluster() {
         batchRecordsState.records = Array.isArray(data.records) ? data.records : [];
         batchRecordsState.selectedIds.clear();
         batchRecordsState.expandedIds.clear();
+        batchRecordsState.pendingEdits.clear();
         clearBatchOperationPreview();
+        clearBatchFieldApplyPreview();
         renderBatchRecordsList();
 
         const missing = data.summary?.missingRelationshipTargets || data.summary?.missingReferenceIds || [];
@@ -4311,9 +4476,46 @@ function createBatchEditField(labelText, field) {
     return label;
 }
 
+function getBatchPendingPayload(record) {
+    const id = getBatchRecordId(record);
+    return batchRecordsState.pendingEdits.get(id) || null;
+}
+
+function getBatchDraftInfo(record) {
+    const pending = getBatchPendingPayload(record);
+    return {
+        ...getBatchRecordInfo(record),
+        ...(pending?.info || {})
+    };
+}
+
+function getBatchDraftParentIds(record) {
+    const pending = getBatchPendingPayload(record);
+    return Array.isArray(pending?.parentId) ? pending.parentId : getBatchRecordParentIds(record);
+}
+
+function getBatchDraftChildIds(record) {
+    const pending = getBatchPendingPayload(record);
+    return Array.isArray(pending?.children) ? pending.children : getBatchRecordChildIds(record);
+}
+
+function markBatchRecordRowDirty(id, row) {
+    if (!id || !row) return;
+    const payload = collectBatchRecordRowPayload(row);
+    batchRecordsState.pendingEdits.set(id, payload);
+    row.classList.add('is-dirty');
+
+    const status = row.querySelector('.batch-record-save-status');
+    if (status) status.textContent = 'Edited locally. Save this row or use Save Edited Rows.';
+
+    clearBatchOperationPreview();
+    clearBatchFieldApplyPreview();
+    updateBatchSelectionControls();
+}
+
 function renderBatchRecordEditor(record, row) {
     const id = getBatchRecordId(record);
-    const info = getBatchRecordInfo(record);
+    const info = getBatchDraftInfo(record);
     const editor = document.createElement('div');
     editor.classList.add('batch-record-editor');
 
@@ -4327,15 +4529,22 @@ function renderBatchRecordEditor(record, row) {
     editor.appendChild(createBatchEditField(imageKey, createBatchTextInput(`info.${imageKey}`, info[imageKey] || '')));
     editor.appendChild(createBatchEditField('note', createBatchTextarea('info.note', info.note || '', 4)));
     editor.appendChild(createBatchEditField('note_jp', createBatchTextarea('info.note_jp', info.note_jp || '', 4)));
-    editor.appendChild(createBatchEditField('parentId', createBatchTextarea('parentId', getBatchRecordParentIds(record).join('\n'), 3)));
-    editor.appendChild(createBatchEditField('children', createBatchTextarea('children', getBatchRecordChildIds(record).join('\n'), 3)));
+    editor.appendChild(createBatchEditField('parentId', createBatchTextarea('parentId', getBatchDraftParentIds(record).join('\n'), 3)));
+    editor.appendChild(createBatchEditField('children', createBatchTextarea('children', getBatchDraftChildIds(record).join('\n'), 3)));
+
+    editor.querySelectorAll('input, textarea').forEach(field => {
+        field.addEventListener('input', () => markBatchRecordRowDirty(id, row));
+        field.addEventListener('change', () => markBatchRecordRowDirty(id, row));
+    });
 
     const actions = document.createElement('div');
     actions.classList.add('batch-record-editor-actions');
 
     const status = document.createElement('span');
     status.classList.add('batch-record-save-status');
-    status.textContent = 'Unsaved changes stay local until you save this row.';
+    status.textContent = batchRecordsState.pendingEdits.has(id)
+        ? 'Edited locally. Save this row or use Save Edited Rows.'
+        : 'Unsaved changes stay local until you save this row.';
 
     const saveButton = document.createElement('button');
     saveButton.type = 'button';
@@ -4365,10 +4574,11 @@ function renderBatchRecordsList() {
 
     batchRecordsState.records.forEach(record => {
         const id = getBatchRecordId(record);
-        const info = getBatchRecordInfo(record);
+        const info = getBatchDraftInfo(record);
         const row = document.createElement('div');
         row.classList.add('batch-record-row');
         if (batchRecordsState.expandedIds.has(id)) row.classList.add('is-expanded');
+        if (batchRecordsState.pendingEdits.has(id)) row.classList.add('is-dirty');
         row.dataset.id = id;
 
         const summary = document.createElement('div');
@@ -4382,17 +4592,24 @@ function renderBatchRecordsList() {
             else batchRecordsState.selectedIds.delete(id);
             updateBatchSelectionControls();
             clearBatchOperationPreview();
+            clearBatchFieldApplyPreview();
         });
 
         const title = document.createElement('div');
         const jp = getBatchRecordJapaneseLabel(record);
-        title.innerHTML = `<div class="batch-record-title">${escapeHTML(getBatchRecordLabel(record))}${jp ? `<span class="batch-record-jp">${escapeHTML(jp)}</span>` : ''}</div><div class="batch-record-meta"><span class="batch-record-chip">${escapeHTML(getBatchRecordType(record) || 'unknown')}</span><span class="batch-record-chip">${escapeHTML(formatBatchRecordDate(record))}</span><span class="batch-record-chip">depth ${Number(record.depth || 0)}</span></div>`;
+        const draftLabel = info.label || getBatchRecordLabel(record);
+        const draftType = info.type || getBatchRecordType(record) || 'unknown';
+        const draftDate = ((draftType === 'artist' || draftType === 'theorist') && (info.birth || info.death))
+            ? `${info.birth || '?'}–${info.death || ''}`
+            : (info.date || formatBatchRecordDate(record));
+        title.innerHTML = `<div class="batch-record-title">${escapeHTML(draftLabel)}${jp ? `<span class="batch-record-jp">${escapeHTML(jp)}</span>` : ''}${batchRecordsState.pendingEdits.has(id) ? '<span class="batch-dirty-chip">edited</span>' : ''}</div><div class="batch-record-meta"><span class="batch-record-chip">${escapeHTML(draftType)}</span><span class="batch-record-chip">${escapeHTML(draftDate)}</span><span class="batch-record-chip">depth ${Number(record.depth || 0)}</span></div>`;
 
         const relations = document.createElement('div');
         const parentLabels = Array.isArray(record.parentLabels) ? record.parentLabels : [];
         const childLabels = Array.isArray(record.childLabels) ? record.childLabels : [];
         relations.classList.add('batch-record-relationships');
-        relations.innerHTML = `Parents: ${parentLabels.length ? parentLabels.map(escapeHTML).join(', ') : '<em>none</em>'}<br>Children: ${childLabels.length ? childLabels.slice(0, 5).map(escapeHTML).join(', ') : '<em>none</em>'}${childLabels.length > 5 ? ` + ${childLabels.length - 5} more` : ''}<br><span class="${getBatchRecordImageUrl(record) ? 'batch-record-has-image' : 'batch-record-missing-image'}">${getBatchRecordImageUrl(record) ? 'has image' : 'missing image'}</span>`;
+        const draftImageUrl = getFirstImageUrl(info);
+        relations.innerHTML = `Parents: ${parentLabels.length ? parentLabels.map(escapeHTML).join(', ') : '<em>none</em>'}<br>Children: ${childLabels.length ? childLabels.slice(0, 5).map(escapeHTML).join(', ') : '<em>none</em>'}${childLabels.length > 5 ? ` + ${childLabels.length - 5} more` : ''}<br><span class="${draftImageUrl ? 'batch-record-has-image' : 'batch-record-missing-image'}">${draftImageUrl ? 'has image' : 'missing image'}</span>`;
 
         const note = document.createElement('div');
         note.classList.add('batch-record-note-preview');
@@ -4447,6 +4664,17 @@ function collectBatchRecordRowPayload(row) {
     return { info, parentId, children };
 }
 
+async function putBatchRecordPayload(id, payload) {
+    const response = await fetch(`${baseURL}/api/reference/update/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || data.message || 'Save failed.');
+    return data;
+}
+
 async function saveBatchRecordRow(id, row) {
     if (!id || !row) return;
 
@@ -4458,16 +4686,12 @@ async function saveBatchRecordRow(id, row) {
     if (status) status.textContent = 'Saving...';
 
     try {
-        const response = await fetch(`${baseURL}/api/reference/update/${encodeURIComponent(id)}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || data.message || 'Save failed.');
+        const data = await putBatchRecordPayload(id, payload);
 
         if (data.record) replaceBatchRecordInState(data.record);
+        batchRecordsState.pendingEdits.delete(id);
         clearBatchOperationPreview();
+        clearBatchFieldApplyPreview();
         renderBatchRecordsList();
         const refreshedRow = document.querySelector(`.batch-record-row[data-id="${CSS.escape(id)}"]`);
         const refreshedStatus = refreshedRow?.querySelector('.batch-record-save-status');
@@ -4478,6 +4702,43 @@ async function saveBatchRecordRow(id, row) {
         alert(`Save failed: ${error.message}`);
     } finally {
         if (saveButton) saveButton.disabled = false;
+    }
+}
+
+async function saveDirtyBatchRecords() {
+    const entries = [...batchRecordsState.pendingEdits.entries()].filter(([id]) => id);
+    if (!entries.length) return;
+
+    const confirmed = window.confirm(`Save ${entries.length} edited row${entries.length === 1 ? '' : 's'}?
+
+This writes each dirty row to the canonical reference database.`);
+    if (!confirmed) return;
+
+    const saveDirtyButton = document.getElementById('batch-save-dirty-records');
+    if (saveDirtyButton) saveDirtyButton.disabled = true;
+    setBatchClusterStatus(`Saving ${entries.length} edited row${entries.length === 1 ? '' : 's'}...`);
+
+    const failures = [];
+    for (const [id, payload] of entries) {
+        try {
+            const data = await putBatchRecordPayload(id, payload);
+            if (data.record) replaceBatchRecordInState(data.record);
+            batchRecordsState.pendingEdits.delete(id);
+        } catch (error) {
+            failures.push({ id, error });
+            console.error('Error saving dirty batch row:', id, error);
+        }
+    }
+
+    clearBatchOperationPreview();
+    clearBatchFieldApplyPreview();
+    renderBatchRecordsList();
+
+    if (failures.length) {
+        setBatchClusterStatus(`Saved ${entries.length - failures.length} row${entries.length - failures.length === 1 ? '' : 's'}; ${failures.length} failed.`);
+        alert(`Some rows failed to save:\n${failures.slice(0, 8).map(row => `${row.id}: ${row.error.message}`).join('\n')}`);
+    } else {
+        setBatchClusterStatus(`Saved ${entries.length} edited row${entries.length === 1 ? '' : 's'}.`);
     }
 }
 
@@ -4494,20 +4755,140 @@ function clearBatchRecordSelection() {
     batchRecordsState.selectedIds.clear();
     renderBatchRecordsList();
     clearBatchOperationPreview();
+    clearBatchFieldApplyPreview();
+}
+
+function expandAllBatchRecords() {
+    batchRecordsState.records.forEach(record => {
+        const id = getBatchRecordId(record);
+        if (id) batchRecordsState.expandedIds.add(id);
+    });
+    renderBatchRecordsList();
+}
+
+function collapseAllBatchRecords() {
+    batchRecordsState.expandedIds.clear();
+    renderBatchRecordsList();
+}
+
+
+function getBatchApplyFieldName() {
+    const field = document.getElementById('batch-apply-field-select')?.value || '';
+    return BATCH_APPLY_INFO_FIELDS.has(field) ? field : '';
+}
+
+function getBatchApplyFieldValue() {
+    return document.getElementById('batch-apply-field-value')?.value || '';
+}
+
+function previewBatchFieldApply() {
+    const preview = document.getElementById('batch-field-apply-preview');
+    if (!preview) return;
+
+    const field = getBatchApplyFieldName();
+    const value = getBatchApplyFieldValue();
+    const allowBlank = Boolean(document.getElementById('batch-apply-allow-blank')?.checked);
+    const selected = getBatchSelectedRecords();
+
+    if (!field) {
+        alert('Choose a supported info field first.');
+        return;
+    }
+
+    if (!selected.length) {
+        alert('Select at least one record first.');
+        return;
+    }
+
+    if (!value.trim() && !allowBlank) {
+        alert('Blank values are blocked unless “allow blank value” is checked.');
+        return;
+    }
+
+    const rows = selected.map(record => {
+        const info = getBatchDraftInfo(record);
+        const currentValue = String(info[field] || '');
+        const changed = currentValue !== value;
+        return { record, field, currentValue, nextValue: value, changed };
+    });
+
+    batchRecordsState.fieldPreviewRows = rows;
+    preview.innerHTML = '';
+
+    const changedCount = rows.filter(row => row.changed).length;
+    const summary = document.createElement('div');
+    summary.classList.add('batch-preview-summary');
+    summary.innerHTML = `<strong>Preview:</strong> ${changedCount} of ${rows.length} selected record${rows.length === 1 ? '' : 's'} would receive <code>info.${escapeHTML(field)}</code> = <code>${escapeHTML(value || '[blank]')}</code>.`;
+    preview.appendChild(summary);
+
+    rows.forEach(row => {
+        const item = document.createElement('div');
+        item.classList.add('batch-preview-row');
+        if (!row.changed) item.classList.add('batch-preview-noop');
+        item.innerHTML = `<div><strong>${escapeHTML(getBatchRecordLabel(row.record))}</strong><br><code>${escapeHTML(getBatchRecordId(row.record))}</code></div><div>${row.changed ? 'Would set field' : 'No change'}</div><div><strong>current</strong>: ${escapeHTML(row.currentValue || '[blank]')}<br><strong>next</strong>: ${escapeHTML(row.nextValue || '[blank]')}</div>`;
+        preview.appendChild(item);
+    });
+
+    updateBatchSelectionControls();
+}
+
+async function commitBatchFieldApply() {
+    const field = getBatchApplyFieldName();
+    const rowsToChange = batchRecordsState.fieldPreviewRows.filter(row => row && row.changed);
+
+    if (!field || !rowsToChange.length) {
+        alert('Preview a field-set operation with at least one real change first.');
+        return;
+    }
+
+    const confirmed = window.confirm(`Commit field set?
+
+Set info.${field} on ${rowsToChange.length} selected record${rowsToChange.length === 1 ? '' : 's'}.`);
+    if (!confirmed) return;
+
+    const commitButton = document.getElementById('batch-commit-field-apply');
+    if (commitButton) commitButton.disabled = true;
+    setBatchClusterStatus(`Applying info.${field} to ${rowsToChange.length} record${rowsToChange.length === 1 ? '' : 's'}...`);
+
+    const failures = [];
+    for (const row of rowsToChange) {
+        const id = getBatchRecordId(row.record);
+        const payload = { info: { [field]: row.nextValue } };
+        try {
+            const data = await putBatchRecordPayload(id, payload);
+            if (data.record) replaceBatchRecordInState(data.record);
+            batchRecordsState.pendingEdits.delete(id);
+        } catch (error) {
+            failures.push({ id, error });
+            console.error('Error applying batch field:', id, error);
+        }
+    }
+
+    clearBatchFieldApplyPreview();
+    clearBatchOperationPreview();
+    renderBatchRecordsList();
+
+    if (failures.length) {
+        setBatchClusterStatus(`Applied field to ${rowsToChange.length - failures.length} record${rowsToChange.length - failures.length === 1 ? '' : 's'}; ${failures.length} failed.`);
+        alert(`Some records failed:\n${failures.slice(0, 8).map(row => `${row.id}: ${row.error.message}`).join('\n')}`);
+    } else {
+        setBatchClusterStatus(`Applied info.${field} to ${rowsToChange.length} record${rowsToChange.length === 1 ? '' : 's'}.`);
+    }
 }
 
 function renderResolvedBatchParent(record) {
     batchRecordsState.resolvedParent = record || null;
     const container = document.getElementById('batch-parent-resolution');
+    const config = getBatchRelationshipOperationConfig();
     if (!container) return;
 
     if (!record) {
-        container.textContent = 'No parent resolved.';
+        container.textContent = `No ${config.relatedRole} resolved.`;
         updateBatchSelectionControls();
         return;
     }
 
-    container.innerHTML = `Resolved parent: <strong>${escapeHTML(getBatchRecordLabel(record))}</strong>${getBatchRecordJapaneseLabel(record) ? ` <span class="result-label-jp">${escapeHTML(getBatchRecordJapaneseLabel(record))}</span>` : ''} · ${escapeHTML(getBatchRecordType(record) || 'unknown type')} · <code>${escapeHTML(getBatchRecordId(record))}</code>`;
+    container.innerHTML = `Resolved ${escapeHTML(config.relatedRole)}: <strong>${escapeHTML(getBatchRecordLabel(record))}</strong>${getBatchRecordJapaneseLabel(record) ? ` <span class="result-label-jp">${escapeHTML(getBatchRecordJapaneseLabel(record))}</span>` : ''} · ${escapeHTML(getBatchRecordType(record) || 'unknown type')} · <code>${escapeHTML(getBatchRecordId(record))}</code>`;
     updateBatchSelectionControls();
 }
 
@@ -4524,7 +4905,8 @@ async function resolveBatchParent() {
     const container = document.getElementById('batch-parent-resolution');
 
     if (!value) {
-        alert('Paste a parent ID or type a parent label to resolve.');
+        const config = getBatchRelationshipOperationConfig();
+        alert(`Paste a ${config.relatedRole} ID or type a ${config.relatedRole} label to resolve.`);
         return;
     }
 
@@ -4547,12 +4929,12 @@ async function resolveBatchParent() {
 
         if (!results.length) {
             renderResolvedBatchParent(null);
-            if (container) container.textContent = 'No parent candidates found.';
+            if (container) container.textContent = `No ${getBatchRelationshipOperationConfig().relatedRole} candidates found.`;
             return;
         }
 
         if (container) {
-            container.innerHTML = '<strong>Choose parent:</strong>';
+            container.innerHTML = `<strong>Choose ${getBatchRelationshipOperationConfig().relatedRole}:</strong>`;
             results.slice(0, 10).forEach(candidate => {
                 const button = document.createElement('button');
                 button.type = 'button';
@@ -4570,9 +4952,10 @@ async function resolveBatchParent() {
             });
         }
     } catch (error) {
-        console.error('Error resolving batch parent:', error);
+        const config = getBatchRelationshipOperationConfig();
+        console.error(`Error resolving batch ${config.relatedRole}:`, error);
         renderResolvedBatchParent(null);
-        alert(`Parent resolution failed: ${error.message}`);
+        alert(`${config.relatedRole[0].toUpperCase()}${config.relatedRole.slice(1)} resolution failed: ${error.message}`);
     }
 }
 
@@ -4580,12 +4963,13 @@ function previewBatchOperation() {
     const preview = document.getElementById('batch-operation-preview');
     if (!preview) return;
 
-    const parent = batchRecordsState.resolvedParent;
-    const parentId = getBatchRecordId(parent);
+    const config = getBatchRelationshipOperationConfig();
+    const relatedRecord = batchRecordsState.resolvedParent;
+    const relatedId = getBatchRecordId(relatedRecord);
     const selected = getBatchSelectedRecords();
 
-    if (!parentId) {
-        alert('Resolve a parent first.');
+    if (!relatedId) {
+        alert(`Resolve a ${config.relatedRole} first.`);
         return;
     }
 
@@ -4595,29 +4979,35 @@ function previewBatchOperation() {
     }
 
     const rows = selected.map(record => {
-        const currentParents = getBatchRecordParentIds(record);
+        const currentRelationshipIds = getBatchRelationshipIds(record, config.selectedField);
         const id = getBatchRecordId(record);
-        const isSelfParent = id === parentId;
-        const alreadyPresent = currentParents.includes(parentId);
-        return { record, currentParents, alreadyPresent, isSelfParent };
+        const isSelfRelationship = id === relatedId;
+        const alreadyPresent = currentRelationshipIds.includes(relatedId);
+        return { record, currentRelationshipIds, alreadyPresent, isSelfRelationship, config };
     });
 
     batchRecordsState.previewRows = rows;
-    const changedCount = rows.filter(row => !row.alreadyPresent && !row.isSelfParent).length;
+    const changedCount = rows.filter(row => !row.alreadyPresent && !row.isSelfRelationship).length;
     preview.innerHTML = '';
 
     const summary = document.createElement('div');
     summary.classList.add('batch-preview-summary');
-    summary.innerHTML = `<strong>Preview:</strong> ${changedCount} of ${rows.length} selected record${rows.length === 1 ? '' : 's'} would receive parent <code>${escapeHTML(parentId)}</code>. The parent record's children list will also be updated on commit.`;
+    summary.innerHTML = `<strong>Preview:</strong> ${changedCount} of ${rows.length} selected record${rows.length === 1 ? '' : 's'} would receive ${escapeHTML(config.selectedLabel)} <code>${escapeHTML(relatedId)}</code>. The related record's ${escapeHTML(config.reciprocalField)} list will also be updated on commit.`;
     preview.appendChild(summary);
 
     rows.forEach(row => {
         const item = document.createElement('div');
         item.classList.add('batch-preview-row');
-        if (row.alreadyPresent || row.isSelfParent) item.classList.add('batch-preview-noop');
-        const nextParents = row.alreadyPresent || row.isSelfParent ? row.currentParents : [...row.currentParents, parentId];
-        const status = row.isSelfParent ? 'Skipped: self-parent' : row.alreadyPresent ? 'No change' : 'Would add parent';
-        item.innerHTML = `<div><strong>${escapeHTML(getBatchRecordLabel(row.record))}</strong><br><code>${escapeHTML(getBatchRecordId(row.record))}</code></div><div>${status}</div><div>parentId: ${nextParents.length ? nextParents.map(escapeHTML).join(', ') : '<em>none</em>'}</div>`;
+        if (row.alreadyPresent || row.isSelfRelationship) item.classList.add('batch-preview-noop');
+        const nextRelationshipIds = row.alreadyPresent || row.isSelfRelationship
+            ? row.currentRelationshipIds
+            : [...row.currentRelationshipIds, relatedId];
+        const status = row.isSelfRelationship
+            ? config.selfSkipAction
+            : row.alreadyPresent
+                ? config.alreadyPresentAction
+                : config.previewAction;
+        item.innerHTML = `<div><strong>${escapeHTML(getBatchRecordLabel(row.record))}</strong><br><code>${escapeHTML(getBatchRecordId(row.record))}</code></div><div>${escapeHTML(status)}</div><div>${escapeHTML(config.selectedField)}: ${nextRelationshipIds.length ? nextRelationshipIds.map(escapeHTML).join(', ') : '<em>none</em>'}</div>`;
         preview.appendChild(item);
     });
 
@@ -4625,28 +5015,29 @@ function previewBatchOperation() {
 }
 
 async function commitBatchOperation() {
-    const parent = batchRecordsState.resolvedParent;
-    const parentId = getBatchRecordId(parent);
-    const rowsToChange = batchRecordsState.previewRows.filter(row => row && !row.alreadyPresent && !row.isSelfParent);
+    const config = getBatchRelationshipOperationConfig();
+    const relatedRecord = batchRecordsState.resolvedParent;
+    const relatedId = getBatchRecordId(relatedRecord);
+    const rowsToChange = batchRecordsState.previewRows.filter(row => row && !row.alreadyPresent && !row.isSelfRelationship);
     const recordIds = rowsToChange.map(row => getBatchRecordId(row.record)).filter(Boolean);
 
-    if (!parentId || !recordIds.length) {
-        alert('Preview a parent-add operation with at least one real change first.');
+    if (!relatedId || !recordIds.length) {
+        alert(`Preview a ${config.selectedLabel}-add operation with at least one real change first.`);
         return;
     }
 
-    const parentLabel = getBatchRecordLabel(parent);
-    const confirmed = window.confirm(`Commit parent add?\n\nAdd ${parentLabel} as parent to ${recordIds.length} selected record${recordIds.length === 1 ? '' : 's'} and update the parent children list.`);
+    const relatedLabel = getBatchRecordLabel(relatedRecord);
+    const confirmed = window.confirm(`Commit ${config.selectedLabel} add?\n\nAdd ${relatedLabel} as ${config.selectedLabel} to ${recordIds.length} selected record${recordIds.length === 1 ? '' : 's'} and update the related record's ${config.reciprocalField} list.`);
     if (!confirmed) return;
 
     const commitButton = document.getElementById('batch-commit-operation-button');
     if (commitButton) commitButton.disabled = true;
 
     try {
-        const response = await fetch(`${baseURL}/api/reference/batch-records/add-parent`, {
+        const response = await fetch(`${baseURL}${config.endpoint}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ parentId, recordIds })
+            body: JSON.stringify({ [config.bodyKey]: relatedId, recordIds })
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || data.message || 'Batch commit failed.');
@@ -4658,7 +5049,7 @@ async function commitBatchOperation() {
         clearBatchOperationPreview();
         renderBatchRecordsList();
         setBatchClusterStatus(data.message || `Updated ${data.summary?.changedCount || 0} records.`);
-        alert(data.message || 'Batch parent add committed.');
+        alert(data.message || `Batch ${config.selectedLabel} add committed.`);
     } catch (error) {
         console.error('Error committing batch operation:', error);
         alert(`Batch commit failed: ${error.message}`);
@@ -4667,12 +5058,65 @@ async function commitBatchOperation() {
     }
 }
 
+function sendSelectedBatchRecordsToImageQueue() {
+    const selectedMissingImageRecords = getBatchSelectedMissingImageRecords();
+
+    if (!selectedMissingImageRecords.length) {
+        alert('Select at least one loaded record without an image first.');
+        return;
+    }
+
+    setImageQueueMode('batch');
+
+    const availableSlots = getImageQueueAvailableSlots();
+    if (availableSlots === 0) {
+        alert(`The image queue is already full (${getImageQueueLimit()} records in ${getImageQueueModeLabel()}). Clear space in the Image Queue screen first.`);
+        showContentSection('#section-7');
+        return;
+    }
+
+    const alreadyQueuedIds = new Set(imageQueueRecords.map(record => record.id).filter(Boolean));
+    const recordsToQueue = selectedMissingImageRecords
+        .map(record => normaliseImageQueueRecord(record))
+        .filter(record => record.id && !alreadyQueuedIds.has(record.id))
+        .slice(0, availableSlots);
+
+    if (!recordsToQueue.length) {
+        alert('All selected missing-image records are already in the image queue, or could not be queued safely.');
+        showContentSection('#section-7');
+        return;
+    }
+
+    recordsToQueue.forEach(record => {
+        imageQueueRecords.push(record);
+    });
+    renderImageQueue();
+    showContentSection('#section-7');
+
+    const skippedBecauseFull = selectedMissingImageRecords.length - recordsToQueue.length;
+    const message = skippedBecauseFull > 0
+        ? `Queued ${recordsToQueue.length} record${recordsToQueue.length === 1 ? '' : 's'} for image search. ${skippedBecauseFull} selected record${skippedBecauseFull === 1 ? ' was' : 's were'} skipped because of queue limit/duplicates.`
+        : `Queued ${recordsToQueue.length} record${recordsToQueue.length === 1 ? '' : 's'} for image search.`;
+    setBatchClusterStatus(message);
+}
+
+
 function initialiseBatchRecordsWorkbench() {
     const searchButton = document.getElementById('batch-root-search-button');
     const searchInput = document.getElementById('batch-root-query');
     const loadButton = document.getElementById('batch-load-cluster-button');
     const selectAllButton = document.getElementById('batch-select-all');
     const clearSelectionButton = document.getElementById('batch-clear-selection');
+    const expandAllButton = document.getElementById('batch-expand-all');
+    const collapseAllButton = document.getElementById('batch-collapse-all');
+    const saveDirtyButton = document.getElementById('batch-save-dirty-records');
+    const fieldValue = document.getElementById('batch-apply-field-value');
+    const fieldSelect = document.getElementById('batch-apply-field-select');
+    const fieldAllowBlank = document.getElementById('batch-apply-allow-blank');
+    const fieldPreviewButton = document.getElementById('batch-preview-field-apply');
+    const fieldCommitButton = document.getElementById('batch-commit-field-apply');
+    const sendImageQueueButton = document.getElementById('batch-send-selected-image-queue');
+    const operationSelect = document.getElementById('batch-operation-select');
     const resolveParentButton = document.getElementById('batch-resolve-parent-button');
     const parentInput = document.getElementById('batch-parent-input');
     const previewButton = document.getElementById('batch-preview-operation-button');
@@ -4700,12 +5144,31 @@ function initialiseBatchRecordsWorkbench() {
     if (loadButton) loadButton.addEventListener('click', loadBatchRecordCluster);
     if (selectAllButton) selectAllButton.addEventListener('click', selectAllBatchRecords);
     if (clearSelectionButton) clearSelectionButton.addEventListener('click', clearBatchRecordSelection);
+    if (expandAllButton) expandAllButton.addEventListener('click', expandAllBatchRecords);
+    if (collapseAllButton) collapseAllButton.addEventListener('click', collapseAllBatchRecords);
+    if (saveDirtyButton) saveDirtyButton.addEventListener('click', saveDirtyBatchRecords);
+    if (sendImageQueueButton) sendImageQueueButton.addEventListener('click', sendSelectedBatchRecordsToImageQueue);
+    if (fieldPreviewButton) fieldPreviewButton.addEventListener('click', previewBatchFieldApply);
+    if (fieldCommitButton) fieldCommitButton.addEventListener('click', commitBatchFieldApply);
+    if (fieldValue) fieldValue.addEventListener('input', clearBatchFieldApplyPreview);
+    if (fieldSelect) fieldSelect.addEventListener('change', clearBatchFieldApplyPreview);
+    if (fieldAllowBlank) fieldAllowBlank.addEventListener('change', clearBatchFieldApplyPreview);
+    if (operationSelect) {
+        operationSelect.addEventListener('change', () => {
+            batchRecordsState.resolvedParent = null;
+            const container = document.getElementById('batch-parent-resolution');
+            if (container) container.textContent = 'Relationship operation changed; resolve the related record again.';
+            clearBatchOperationPreview();
+            syncBatchOperationLabels();
+            updateBatchSelectionControls();
+        });
+    }
     if (resolveParentButton) resolveParentButton.addEventListener('click', resolveBatchParent);
     if (parentInput) {
         parentInput.addEventListener('input', () => {
             batchRecordsState.resolvedParent = null;
             const container = document.getElementById('batch-parent-resolution');
-            if (container) container.textContent = 'Parent changed; resolve again before previewing.';
+            if (container) container.textContent = 'Related record changed; resolve again before previewing.';
             clearBatchOperationPreview();
             updateBatchSelectionControls();
         });
@@ -4720,6 +5183,7 @@ function initialiseBatchRecordsWorkbench() {
     if (commitButton) commitButton.addEventListener('click', commitBatchOperation);
 
     syncBatchSourceControls();
+    syncBatchOperationLabels();
     renderBatchSelectedRoot();
     renderBatchRecordsList();
     renderResolvedBatchParent(null);

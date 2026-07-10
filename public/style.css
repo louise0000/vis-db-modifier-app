@@ -1823,7 +1823,9 @@ nav ul li a:hover {
 .batch-records-search-row input,
 .batch-records-controls select,
 .batch-operation-grid input,
-.batch-operation-grid select {
+.batch-operation-grid select,
+.batch-apply-field-grid select,
+.batch-apply-field-grid textarea {
     width: 100%;
     padding: 8px 10px;
     border: 1px solid rgba(0, 0, 0, 0.22);
@@ -1835,7 +1837,8 @@ nav ul li a:hover {
 .batch-records-search-row button,
 #batch-load-cluster-button,
 .batch-records-workbench-actions button,
-.batch-operation-grid button {
+.batch-operation-grid button,
+.batch-apply-field-grid button {
     padding: 8px 12px;
     border: none;
     border-radius: 999px;
@@ -1849,14 +1852,16 @@ nav ul li a:hover {
 .batch-records-search-row button:hover:not(:disabled),
 #batch-load-cluster-button:hover:not(:disabled),
 .batch-records-workbench-actions button:hover:not(:disabled),
-.batch-operation-grid button:hover:not(:disabled) {
+.batch-operation-grid button:hover:not(:disabled),
+.batch-apply-field-grid button:hover:not(:disabled) {
     background: #555;
 }
 
 .batch-records-search-row button:disabled,
 #batch-load-cluster-button:disabled,
 .batch-records-workbench-actions button:disabled,
-.batch-operation-grid button:disabled {
+.batch-operation-grid button:disabled,
+.batch-apply-field-grid button:disabled {
     opacity: 0.45;
     cursor: not-allowed;
 }
@@ -1906,7 +1911,8 @@ nav ul li a:hover {
 }
 
 .batch-records-controls label,
-.batch-operation-grid label {
+.batch-operation-grid label,
+.batch-apply-field-grid label {
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -2031,9 +2037,76 @@ nav ul li a:hover {
     opacity: 0.56;
 }
 
+
+.batch-control-disabled {
+    opacity: 0.36;
+    filter: grayscale(0.45);
+    cursor: not-allowed;
+}
+
+.batch-control-disabled select,
+.batch-control-disabled input,
+.batch-control-disabled button {
+    pointer-events: none;
+    cursor: not-allowed;
+}
+
+.batch-operation-subpanel {
+    margin-top: 12px;
+    padding: 12px;
+    border: 1px dashed rgba(0, 0, 0, 0.18);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.36);
+}
+
+.batch-operation-subpanel h4 {
+    margin-bottom: 8px;
+    font-weight: bold;
+    font-size: 14px;
+}
+
+.batch-apply-field-grid {
+    display: grid;
+    grid-template-columns: minmax(150px, 0.7fr) minmax(280px, 1.4fr) minmax(120px, auto) auto auto;
+    gap: 10px;
+    align-items: end;
+}
+
+.batch-apply-value-label {
+    min-width: 240px;
+}
+
+.batch-apply-field-grid textarea {
+    resize: vertical;
+    min-height: 42px;
+}
+
+.batch-allow-blank-label {
+    align-self: center;
+    padding-bottom: 8px;
+}
+
+.batch-record-row.is-dirty {
+    border-color: rgba(228, 121, 247, 0.72);
+    box-shadow: inset 4px 0 0 rgba(228, 121, 247, 0.46);
+}
+
+.batch-dirty-chip {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: #ffa8e8;
+    color: #222;
+    font-size: 10px;
+    font-weight: normal;
+    vertical-align: middle;
+}
+
 @media (max-width: 980px) {
     .batch-records-layout,
-    .batch-operation-grid {
+    .batch-operation-grid,
+    .batch-apply-field-grid {
         grid-template-columns: 1fr;
     }
 
@@ -2075,6 +2148,8 @@ nav ul li a:hover {
 .batch-records-controls select,
 .batch-operation-grid input,
 .batch-operation-grid select,
+.batch-apply-field-grid select,
+.batch-apply-field-grid textarea,
 .batch-record-editor input,
 .batch-record-editor textarea {
     width: 100%;
@@ -2083,15 +2158,6 @@ nav ul li a:hover {
     border-radius: 8px;
     font-family: inherit;
     font-size: 13px;
-}
-
-.batch-control-disabled {
-    opacity: 0.42;
-}
-
-.batch-control-disabled select,
-.batch-control-disabled input {
-    pointer-events: none;
 }
 
 .batch-record-row {
@@ -2188,7 +2254,8 @@ nav ul li a:hover {
     .batch-records-search-row,
     .batch-record-summary,
     .batch-record-editor,
-    .batch-operation-grid {
+    .batch-operation-grid,
+    .batch-apply-field-grid {
         grid-template-columns: 1fr;
     }
 

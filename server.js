@@ -2773,6 +2773,98 @@ app.post('/api/reference/batch-records/add-parent', async (req, res) => {
   }
 });
 
+
+// Reviewed repeated operation for Batch Records: add one child to many selected
+// records and update the child's parentId array reciprocally.
+app.post('/api/reference/batch-records/add-child', async (req, res) => {
+  try {
+    const childId = String(req.body?.childId || '').trim();
+    const recordIds = [...new Set(
+      (Array.isArray(req.body?.recordIds) ? req.body.recordIds : [])
+        .map(id => String(id || '').trim())
+        .filter(Boolean)
+    )];
+
+    if (!childId) {
+      return res.status(400).json({ message: 'childId is required.' });
+    }
+
+    if (!recordIds.length) {
+      return res.status(400).json({ message: 'At least one record id is required.' });
+    }
+
+    const collection = db.collection('reference');
+    const child = await collection.findOne({ id: childId });
+
+    if (!child) {
+      return res.status(404).json({ message: 'Child record not found.' });
+    }
+
+    const records = await collection.find({ id: { $in: recordIds } }).toArray();
+    const recordsById = new Map(records.map(document => [document.id, document]).filter(([id]) => id));
+    const operations = [];
+    const changedRecordIds = [];
+    const rows = recordIds.map(id => {
+      if (id === childId) return { id, status: 'skipped-self-child' };
+      const record = recordsById.get(id);
+      if (!record) return { id, status: 'missing-record' };
+      const childIds = normaliseRelationshipArray(record.children);
+      if (childIds.includes(childId)) return { id, status: 'already-present' };
+      const nextChildIds = [...childIds, childId];
+      operations.push({
+        updateOne: {
+          filter: { id },
+          update: { $set: { children: nextChildIds } }
+        }
+      });
+      changedRecordIds.push(id);
+      return { id, status: 'child-added', children: nextChildIds };
+    });
+
+    const childParents = normaliseRelationshipArray(child.parentId);
+    const nextChildParents = [...new Set([...childParents, ...changedRecordIds])];
+    const childParentsChanged = nextChildParents.length !== childParents.length;
+
+    if (childParentsChanged) {
+      operations.push({
+        updateOne: {
+          filter: { id: childId },
+          update: { $set: { parentId: nextChildParents } }
+        }
+      });
+    }
+
+    if (operations.length) {
+      await collection.bulkWrite(operations);
+    }
+
+    const allDocuments = await collection.find({}).toArray();
+    const documentsById = new Map(allDocuments.map(document => [document.id, document]).filter(([id]) => id));
+    const updatedRecordIds = [...new Set([...changedRecordIds, childId])];
+    const updatedRecords = updatedRecordIds
+      .map(id => documentsById.get(id))
+      .filter(Boolean)
+      .map(document => summariseBatchReferenceRecord(document, documentsById));
+
+    res.json({
+      message: `Batch child add complete: ${changedRecordIds.length} record${changedRecordIds.length === 1 ? '' : 's'} changed${childParentsChanged ? '; child parent list updated' : ''}.`,
+      rows,
+      updatedRecords,
+      childParentsChanged,
+      summary: {
+        requestedCount: recordIds.length,
+        changedCount: changedRecordIds.length,
+        noopCount: rows.filter(row => row.status === 'already-present').length,
+        missingCount: rows.filter(row => row.status === 'missing-record').length,
+        skippedSelfChildCount: rows.filter(row => row.status === 'skipped-self-child').length
+      }
+    });
+  } catch (err) {
+    console.error('Error applying batch child add:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
 app.get('/api/reference/:id', async (req, res) => {
   try {
     const id = req.params.id;
