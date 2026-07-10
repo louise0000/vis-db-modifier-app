@@ -3977,6 +3977,454 @@ function initialiseImageQueueScaffold() {
 initialiseImageQueueScaffold();
 
 
+
+// -----------------------------------------------------------------------------
+// Batch Records read-only cluster scout
+// -----------------------------------------------------------------------------
+// This is intentionally a safe scaffold: it loads record clusters and previews
+// batch parent additions, but it does not write any batch changes yet.
+const batchRecordsState = {
+    selectedRoot: null,
+    records: [],
+    selectedIds: new Set(),
+    resolvedParent: null
+};
+
+function getBatchRecordInfo(record = {}) {
+    return record.info || record || {};
+}
+
+function getBatchRecordId(record = {}) {
+    return record.id || record.info?.id || '';
+}
+
+function getBatchRecordLabel(record = {}) {
+    const info = getBatchRecordInfo(record);
+    return info.label || record.label || record.id || '(Untitled record)';
+}
+
+function getBatchRecordJapaneseLabel(record = {}) {
+    const info = getBatchRecordInfo(record);
+    return info.label_jp || record.label_jp || '';
+}
+
+function getBatchRecordType(record = {}) {
+    const info = getBatchRecordInfo(record);
+    return info.type || record.type || '';
+}
+
+function getBatchRecordImageUrl(record = {}) {
+    return getFirstImageUrl(getBatchRecordInfo(record));
+}
+
+function formatBatchRecordDate(record = {}) {
+    const info = getBatchRecordInfo(record);
+    const type = getBatchRecordType(record);
+
+    if ((type === 'artist' || type === 'theorist') && (info.birth || info.death)) {
+        return `${info.birth || '?'}–${info.death || ''}`;
+    }
+
+    return info.date || record.date || '[no date]';
+}
+
+function getBatchRecordParentIds(record = {}) {
+    return Array.isArray(record.parentId) ? record.parentId : [];
+}
+
+function getBatchRecordChildIds(record = {}) {
+    return Array.isArray(record.children) ? record.children : [];
+}
+
+function getBatchSelectedRecords() {
+    return batchRecordsState.records.filter(record => batchRecordsState.selectedIds.has(getBatchRecordId(record)));
+}
+
+function setBatchClusterStatus(message = '') {
+    const status = document.getElementById('batch-cluster-status');
+    if (status) status.textContent = message;
+}
+
+function updateBatchSelectionControls() {
+    const selectedCount = batchRecordsState.selectedIds.size;
+    const totalCount = batchRecordsState.records.length;
+    const count = document.getElementById('batch-record-count');
+    const selectAll = document.getElementById('batch-select-all');
+    const clearSelection = document.getElementById('batch-clear-selection');
+    const previewButton = document.getElementById('batch-preview-operation-button');
+
+    if (count) {
+        count.textContent = totalCount
+            ? `${totalCount} record${totalCount === 1 ? '' : 's'} loaded · ${selectedCount} selected`
+            : 'No records loaded.';
+    }
+
+    if (selectAll) selectAll.disabled = totalCount === 0 || selectedCount === totalCount;
+    if (clearSelection) clearSelection.disabled = selectedCount === 0;
+    if (previewButton) previewButton.disabled = selectedCount === 0 || !batchRecordsState.resolvedParent;
+}
+
+function clearBatchOperationPreview() {
+    const preview = document.getElementById('batch-operation-preview');
+    if (preview) preview.innerHTML = '';
+}
+
+function renderBatchSelectedRoot() {
+    const rootPanel = document.getElementById('batch-selected-root');
+    const loadButton = document.getElementById('batch-load-cluster-button');
+
+    if (!rootPanel) return;
+
+    if (!batchRecordsState.selectedRoot) {
+        rootPanel.textContent = 'No root selected.';
+        if (loadButton) loadButton.disabled = true;
+        return;
+    }
+
+    const root = batchRecordsState.selectedRoot;
+    const label = escapeHTML(getBatchRecordLabel(root));
+    const jp = getBatchRecordJapaneseLabel(root);
+    const type = getBatchRecordType(root);
+    const id = getBatchRecordId(root);
+
+    rootPanel.innerHTML = `<strong>${label}</strong>${jp ? ` <span class="result-label-jp">${escapeHTML(jp)}</span>` : ''}<br><span>${escapeHTML(type || 'unknown type')} · ID: ${escapeHTML(id)}</span>`;
+    if (loadButton) loadButton.disabled = !id;
+}
+
+function renderBatchRootResults(data = []) {
+    const container = document.getElementById('batch-root-results');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (!Array.isArray(data) || !data.length) {
+        container.textContent = 'No matches found.';
+        return;
+    }
+
+    data.slice(0, 30).forEach(item => {
+        const id = getBatchRecordId(item);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.classList.add('batch-root-result-button');
+        button.dataset.id = id;
+        button.innerHTML = formatSearchResultLabel(item);
+        button.addEventListener('click', () => {
+            batchRecordsState.selectedRoot = item;
+            batchRecordsState.records = [];
+            batchRecordsState.selectedIds.clear();
+            document.querySelectorAll('.batch-root-result-button').forEach(result => result.classList.remove('is-selected'));
+            button.classList.add('is-selected');
+            renderBatchSelectedRoot();
+            renderBatchRecordsList();
+            clearBatchOperationPreview();
+            setBatchClusterStatus('Root selected. Choose scope and load the cluster.');
+        });
+        container.appendChild(button);
+    });
+}
+
+async function searchBatchRootRecords() {
+    const input = document.getElementById('batch-root-query');
+    const query = input?.value.trim();
+
+    if (!query) {
+        alert('Please enter a root search term.');
+        return;
+    }
+
+    try {
+        setBatchClusterStatus('Searching root records...');
+        const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(query)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || 'Root search failed.');
+        renderBatchRootResults(data);
+        setBatchClusterStatus(`Found ${Array.isArray(data) ? data.length : 0} possible root record${Array.isArray(data) && data.length === 1 ? '' : 's'}.`);
+    } catch (error) {
+        console.error('Error searching batch roots:', error);
+        setBatchClusterStatus('Root search failed.');
+        alert(`Root search failed: ${error.message}`);
+    }
+}
+
+async function loadBatchRecordCluster() {
+    const rootId = getBatchRecordId(batchRecordsState.selectedRoot);
+    if (!rootId) {
+        alert('Choose a root record first.');
+        return;
+    }
+
+    const depth = document.getElementById('batch-depth-select')?.value || 'recursive';
+    const types = document.getElementById('batch-type-filter')?.value || '';
+    const includeRoot = Boolean(document.getElementById('batch-include-root')?.checked);
+    const missingImagesOnly = Boolean(document.getElementById('batch-missing-images-only')?.checked);
+
+    const params = new URLSearchParams({
+        depth,
+        includeRoot: includeRoot ? 'true' : 'false',
+        missingImagesOnly: missingImagesOnly ? 'true' : 'false'
+    });
+    if (types) params.set('types', types);
+
+    try {
+        setBatchClusterStatus('Loading cluster...');
+        const response = await fetch(`${baseURL}/api/reference/batch-records/cluster/${encodeURIComponent(rootId)}?${params.toString()}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || 'Cluster load failed.');
+
+        batchRecordsState.records = Array.isArray(data.records) ? data.records : [];
+        batchRecordsState.selectedIds.clear();
+        clearBatchOperationPreview();
+        renderBatchRecordsList();
+
+        const missing = data.summary?.missingRelationshipTargets || [];
+        const missingText = missing.length ? ` · ${missing.length} missing relationship target${missing.length === 1 ? '' : 's'} ignored` : '';
+        setBatchClusterStatus(`Loaded ${data.summary?.returnedCount || 0} of ${data.summary?.discoveredCount || 0} discovered descendant record${data.summary?.discoveredCount === 1 ? '' : 's'}${missingText}.`);
+    } catch (error) {
+        console.error('Error loading batch cluster:', error);
+        setBatchClusterStatus('Cluster load failed.');
+        alert(`Cluster load failed: ${error.message}`);
+    }
+}
+
+function renderBatchRecordsList() {
+    const list = document.getElementById('batch-records-list');
+    if (!list) return;
+
+    list.innerHTML = '';
+
+    if (!batchRecordsState.records.length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No records loaded yet.';
+        list.appendChild(empty);
+        updateBatchSelectionControls();
+        return;
+    }
+
+    batchRecordsState.records.forEach(record => {
+        const id = getBatchRecordId(record);
+        const info = getBatchRecordInfo(record);
+        const row = document.createElement('div');
+        row.classList.add('batch-record-row');
+        row.dataset.id = id;
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = batchRecordsState.selectedIds.has(id);
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) batchRecordsState.selectedIds.add(id);
+            else batchRecordsState.selectedIds.delete(id);
+            updateBatchSelectionControls();
+            clearBatchOperationPreview();
+        });
+
+        const title = document.createElement('div');
+        const jp = getBatchRecordJapaneseLabel(record);
+        title.innerHTML = `<div class="batch-record-title">${escapeHTML(getBatchRecordLabel(record))}${jp ? `<span class="batch-record-jp">${escapeHTML(jp)}</span>` : ''}</div><div class="batch-record-meta"><span class="batch-record-chip">${escapeHTML(getBatchRecordType(record) || 'unknown')}</span><span class="batch-record-chip">${escapeHTML(formatBatchRecordDate(record))}</span><span class="batch-record-chip">depth ${Number(record.depth || 0)}</span></div>`;
+
+        const relations = document.createElement('div');
+        const parentLabels = Array.isArray(record.parentLabels) ? record.parentLabels : [];
+        const childLabels = Array.isArray(record.childLabels) ? record.childLabels : [];
+        relations.classList.add('batch-record-relationships');
+        relations.innerHTML = `Parents: ${parentLabels.length ? parentLabels.map(escapeHTML).join(', ') : '<em>none</em>'}<br>Children: ${childLabels.length ? childLabels.slice(0, 5).map(escapeHTML).join(', ') : '<em>none</em>'}${childLabels.length > 5 ? ` + ${childLabels.length - 5} more` : ''}<br><span class="${getBatchRecordImageUrl(record) ? 'batch-record-has-image' : 'batch-record-missing-image'}">${getBatchRecordImageUrl(record) ? 'has image' : 'missing image'}</span>`;
+
+        const note = document.createElement('div');
+        note.classList.add('batch-record-note-preview');
+        const noteText = String(info.note || info.note_jp || '').replace(/\s+/g, ' ').trim();
+        note.innerHTML = `<code>${escapeHTML(id)}</code><br>${noteText ? escapeHTML(noteText.slice(0, 160)) + (noteText.length > 160 ? '…' : '') : '<em>no note</em>'}`;
+
+        row.appendChild(checkbox);
+        row.appendChild(title);
+        row.appendChild(relations);
+        row.appendChild(note);
+        list.appendChild(row);
+    });
+
+    updateBatchSelectionControls();
+}
+
+function selectAllBatchRecords() {
+    batchRecordsState.records.forEach(record => {
+        const id = getBatchRecordId(record);
+        if (id) batchRecordsState.selectedIds.add(id);
+    });
+    renderBatchRecordsList();
+    clearBatchOperationPreview();
+}
+
+function clearBatchRecordSelection() {
+    batchRecordsState.selectedIds.clear();
+    renderBatchRecordsList();
+    clearBatchOperationPreview();
+}
+
+function renderResolvedBatchParent(record) {
+    batchRecordsState.resolvedParent = record || null;
+    const container = document.getElementById('batch-parent-resolution');
+    if (!container) return;
+
+    if (!record) {
+        container.textContent = 'No parent resolved.';
+        updateBatchSelectionControls();
+        return;
+    }
+
+    container.innerHTML = `Resolved parent: <strong>${escapeHTML(getBatchRecordLabel(record))}</strong>${getBatchRecordJapaneseLabel(record) ? ` <span class="result-label-jp">${escapeHTML(getBatchRecordJapaneseLabel(record))}</span>` : ''} · ${escapeHTML(getBatchRecordType(record) || 'unknown type')} · <code>${escapeHTML(getBatchRecordId(record))}</code>`;
+    updateBatchSelectionControls();
+}
+
+async function fetchBatchParentById(id) {
+    const response = await fetch(`${baseURL}/api/reference/${encodeURIComponent(id)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || data.message || 'No record found for this ID.');
+    return data;
+}
+
+async function resolveBatchParent() {
+    const input = document.getElementById('batch-parent-input');
+    const value = input?.value.trim();
+    const container = document.getElementById('batch-parent-resolution');
+
+    if (!value) {
+        alert('Paste a parent ID or type a parent label to resolve.');
+        return;
+    }
+
+    batchRecordsState.resolvedParent = null;
+    clearBatchOperationPreview();
+    if (container) container.textContent = 'Resolving parent...';
+
+    try {
+        if (/^[0-9a-f-]{24,36}$/i.test(value)) {
+            const record = await fetchBatchParentById(value);
+            renderResolvedBatchParent(record);
+            return;
+        }
+
+        const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(value)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || 'Parent search failed.');
+
+        if (!Array.isArray(data) || !data.length) {
+            renderResolvedBatchParent(null);
+            if (container) container.textContent = 'No parent candidates found.';
+            return;
+        }
+
+        if (container) {
+            container.innerHTML = '<strong>Choose parent:</strong>';
+            data.slice(0, 10).forEach(candidate => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.classList.add('candidate-result-button');
+                button.innerHTML = formatSearchResultLabel(candidate);
+                button.addEventListener('click', async () => {
+                    try {
+                        const fullRecord = await fetchFullRecordForEdit(candidate);
+                        renderResolvedBatchParent(fullRecord);
+                    } catch (error) {
+                        renderResolvedBatchParent(candidate);
+                    }
+                });
+                container.appendChild(button);
+            });
+        }
+    } catch (error) {
+        console.error('Error resolving batch parent:', error);
+        renderResolvedBatchParent(null);
+        alert(`Parent resolution failed: ${error.message}`);
+    }
+}
+
+function previewBatchOperation() {
+    const preview = document.getElementById('batch-operation-preview');
+    if (!preview) return;
+
+    const parent = batchRecordsState.resolvedParent;
+    const parentId = getBatchRecordId(parent);
+    const selected = getBatchSelectedRecords();
+
+    if (!parentId) {
+        alert('Resolve a parent first.');
+        return;
+    }
+
+    if (!selected.length) {
+        alert('Select at least one record first.');
+        return;
+    }
+
+    const rows = selected.map(record => {
+        const currentParents = getBatchRecordParentIds(record);
+        const alreadyPresent = currentParents.includes(parentId);
+        return { record, currentParents, alreadyPresent };
+    });
+
+    const changedCount = rows.filter(row => !row.alreadyPresent).length;
+    preview.innerHTML = '';
+
+    const summary = document.createElement('div');
+    summary.classList.add('batch-preview-summary');
+    summary.innerHTML = `<strong>Preview only:</strong> ${changedCount} of ${rows.length} selected record${rows.length === 1 ? '' : 's'} would receive parent <code>${escapeHTML(parentId)}</code>. No write has happened.`;
+    preview.appendChild(summary);
+
+    rows.forEach(row => {
+        const item = document.createElement('div');
+        item.classList.add('batch-preview-row');
+        if (row.alreadyPresent) item.classList.add('batch-preview-noop');
+        const nextParents = row.alreadyPresent ? row.currentParents : [...row.currentParents, parentId];
+        item.innerHTML = `<div><strong>${escapeHTML(getBatchRecordLabel(row.record))}</strong><br><code>${escapeHTML(getBatchRecordId(row.record))}</code></div><div>${row.alreadyPresent ? 'No change' : 'Would add parent'}</div><div>parentId: ${nextParents.length ? nextParents.map(escapeHTML).join(', ') : '<em>none</em>'}</div>`;
+        preview.appendChild(item);
+    });
+}
+
+function initialiseBatchRecordsWorkbench() {
+    const searchButton = document.getElementById('batch-root-search-button');
+    const searchInput = document.getElementById('batch-root-query');
+    const loadButton = document.getElementById('batch-load-cluster-button');
+    const selectAllButton = document.getElementById('batch-select-all');
+    const clearSelectionButton = document.getElementById('batch-clear-selection');
+    const resolveParentButton = document.getElementById('batch-resolve-parent-button');
+    const parentInput = document.getElementById('batch-parent-input');
+    const previewButton = document.getElementById('batch-preview-operation-button');
+
+    if (searchButton) searchButton.addEventListener('click', searchBatchRootRecords);
+    if (searchInput) {
+        searchInput.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                searchBatchRootRecords();
+            }
+        });
+    }
+    if (loadButton) loadButton.addEventListener('click', loadBatchRecordCluster);
+    if (selectAllButton) selectAllButton.addEventListener('click', selectAllBatchRecords);
+    if (clearSelectionButton) clearSelectionButton.addEventListener('click', clearBatchRecordSelection);
+    if (resolveParentButton) resolveParentButton.addEventListener('click', resolveBatchParent);
+    if (parentInput) {
+        parentInput.addEventListener('input', () => {
+            batchRecordsState.resolvedParent = null;
+            const container = document.getElementById('batch-parent-resolution');
+            if (container) container.textContent = 'Parent changed; resolve again before previewing.';
+            clearBatchOperationPreview();
+            updateBatchSelectionControls();
+        });
+        parentInput.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                resolveBatchParent();
+            }
+        });
+    }
+    if (previewButton) previewButton.addEventListener('click', previewBatchOperation);
+
+    renderBatchSelectedRoot();
+    renderBatchRecordsList();
+    renderResolvedBatchParent(null);
+}
+
+initialiseBatchRecordsWorkbench();
+
 // -----------------------------------------------------------------------------
 // CSV import review
 // -----------------------------------------------------------------------------

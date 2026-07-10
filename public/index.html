@@ -20,6 +20,7 @@
       <li><a href="#section-6">Integrity Report</a></li>
       <li><a href="#section-7">Image Queue</a></li>
       <li><a href="#section-8">CSV Import</a></li>
+      <li><a href="#section-9">Batch Records</a></li>
     </ul>
   </nav>
 
@@ -237,7 +238,7 @@
             </tbody>
           </table>
         </div>
-        <p class="csv-import-example-note">Multiple parent or child labels can be separated with semicolons. Commas are preserved inside names and titles. Every textual relationship must be explicitly resolved or confirmed as no attachment before commit. Maximum 500 non-empty rows per batch. The importer checks both existing database records and other rows in the same CSV batch. Type colour is added automatically when color is blank or omitted.</p>
+        <p class="csv-import-example-note">Multiple parent or child labels can be separated with <strong>semicolons</strong>. Commas are preserved inside names and titles. Every textual relationship must be explicitly resolved or confirmed as no attachment before commit. Maximum 500 non-empty rows per batch. The importer checks both existing database records and other rows in the same CSV batch. Type colour is added automatically when color is blank or omitted.</p>
       </details>
 
       <div id="csv-import-summary"></div>
@@ -249,6 +250,100 @@
       </div>
     </div>
 
+    <!-- Section 9: Batch record cluster review -->
+    <div id="section-9" class="content-section">
+      <h2>Batch Records</h2>
+      <p>Load a record cluster from a root record, review all durable fields, and prepare controlled batch edits. This first pass is read-only: no batch writes are performed here yet.</p>
+
+      <div class="batch-records-layout">
+        <div class="batch-records-panel batch-records-root-panel">
+          <h3>1. Choose a root record</h3>
+          <div class="batch-records-search-row">
+            <input type="text" id="batch-root-query" placeholder="Search paradigm, artist, theorist, book, ID...">
+            <button id="batch-root-search-button" type="button">Search Roots</button>
+          </div>
+          <div id="batch-root-results" class="batch-root-results"></div>
+          <div id="batch-selected-root" class="batch-selected-root">No root selected.</div>
+        </div>
+
+        <div class="batch-records-panel batch-records-scope-panel">
+          <h3>2. Load the cluster</h3>
+          <div class="batch-records-controls">
+            <label>
+              Scope
+              <select id="batch-depth-select">
+                <option value="direct">Direct children only</option>
+                <option value="recursive" selected>Recursive descendants</option>
+              </select>
+            </label>
+
+            <label>
+              Types
+              <select id="batch-type-filter">
+                <option value="">All types</option>
+                <option value="artist,theorist">People only</option>
+                <option value="artworkBook">Artwork/books only</option>
+                <option value="paradigm">Paradigms only</option>
+                <option value="keyword">Keywords only</option>
+              </select>
+            </label>
+
+            <label class="batch-checkbox-label">
+              <input type="checkbox" id="batch-include-root">
+              Include root record
+            </label>
+
+            <label class="batch-checkbox-label">
+              <input type="checkbox" id="batch-missing-images-only">
+              Missing images only
+            </label>
+          </div>
+
+          <button id="batch-load-cluster-button" type="button" disabled>Load Cluster</button>
+          <div id="batch-cluster-status" class="batch-cluster-status"></div>
+        </div>
+      </div>
+
+      <div class="batch-records-panel batch-records-workbench">
+        <div class="batch-records-workbench-header">
+          <div>
+            <h3>3. Review records</h3>
+            <p id="batch-record-count">No records loaded.</p>
+          </div>
+          <div class="batch-records-workbench-actions">
+            <button id="batch-select-all" type="button" disabled>Select All</button>
+            <button id="batch-clear-selection" type="button" disabled>Clear Selection</button>
+          </div>
+        </div>
+
+        <div id="batch-records-list" class="batch-records-list"></div>
+      </div>
+
+      <div class="batch-records-panel batch-records-operation-panel">
+        <h3>4. Batch operation preview</h3>
+        <p>This is deliberately non-destructive. Use it to plan operations such as adding a missing co-parent before we add a commit step.</p>
+
+        <div class="batch-operation-grid">
+          <label>
+            Operation
+            <select id="batch-operation-select">
+              <option value="add-parent">Add parent ID to selected records</option>
+            </select>
+          </label>
+
+          <label>
+            Parent ID or label
+            <input type="text" id="batch-parent-input" placeholder="Paste Guattari's ID, or type Guattari and resolve">
+          </label>
+
+          <button id="batch-resolve-parent-button" type="button">Resolve Parent</button>
+          <button id="batch-preview-operation-button" type="button" disabled>Preview Operation</button>
+        </div>
+
+        <div id="batch-parent-resolution" class="batch-parent-resolution"></div>
+        <div id="batch-operation-preview" class="batch-operation-preview"></div>
+      </div>
+    </div>
 
 
 

@@ -2354,6 +2354,141 @@ app.post('/api/reference/image-queue/finalise-image-candidate', async (req, res)
   }
 });
 
+
+function hasReferenceImage(info = {}) {
+  return ['imgURL', 'imgUrl', 'imageURL', 'imageUrl', 'image_url', 'image']
+    .some(key => String(info?.[key] || '').trim());
+}
+
+function getReferenceLabel(document = {}) {
+  return String(document?.info?.label || document?.label || document?.id || '').trim();
+}
+
+function summariseBatchReferenceRecord(document = {}, documentsById = new Map()) {
+  const info = document.info || {};
+  const parentIds = normaliseRelationshipArray(document.parentId);
+  const childIds = normaliseRelationshipArray(document.children);
+
+  return {
+    id: document.id,
+    info,
+    parentId: parentIds,
+    children: childIds,
+    parentLabels: parentIds.map(parentId => getReferenceLabel(documentsById.get(parentId))).filter(Boolean),
+    childLabels: childIds.map(childId => getReferenceLabel(documentsById.get(childId))).filter(Boolean),
+    hasImage: hasReferenceImage(info)
+  };
+}
+
+function getReferenceBatchChildIds(document = {}, childIdsByParentId = new Map()) {
+  const explicitChildren = normaliseRelationshipArray(document.children);
+  const reverseChildren = childIdsByParentId.get(document.id) || [];
+  return [...new Set([...explicitChildren, ...reverseChildren])].filter(Boolean);
+}
+
+// Read-only cluster loader for the Batch Records workbench.
+// It deliberately performs no writes: it only resolves root children/descendants
+// from both sides of the reference relationship contract.
+app.get('/api/reference/batch-records/cluster/:id', async (req, res) => {
+  try {
+    const rootId = String(req.params.id || '').trim();
+    const depth = String(req.query.depth || 'recursive') === 'direct' ? 'direct' : 'recursive';
+    const includeRoot = String(req.query.includeRoot || '') === 'true';
+    const missingImagesOnly = String(req.query.missingImagesOnly || '') === 'true';
+    const typeFilter = String(req.query.types || '')
+      .split(',')
+      .map(type => type.trim())
+      .filter(Boolean);
+
+    if (!rootId) {
+      return res.status(400).json({ message: 'Root record id is required.' });
+    }
+
+    const collection = db.collection('reference');
+    const documents = await collection.find({}).toArray();
+    const documentsById = new Map(documents.map(document => [document.id, document]).filter(([id]) => id));
+    const root = documentsById.get(rootId);
+
+    if (!root) {
+      return res.status(404).json({ message: 'Root record not found.' });
+    }
+
+    const childIdsByParentId = new Map();
+    documents.forEach(document => {
+      normaliseRelationshipArray(document.parentId).forEach(parentId => {
+        if (!childIdsByParentId.has(parentId)) childIdsByParentId.set(parentId, []);
+        childIdsByParentId.get(parentId).push(document.id);
+      });
+    });
+
+    const visited = new Set();
+    const queue = getReferenceBatchChildIds(root, childIdsByParentId)
+      .map(childId => ({ id: childId, depth: 1 }));
+    const discovered = [];
+    const missingRelationshipTargets = [];
+
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current?.id || visited.has(current.id)) continue;
+      visited.add(current.id);
+
+      const document = documentsById.get(current.id);
+      if (!document) {
+        missingRelationshipTargets.push(current.id);
+        continue;
+      }
+
+      discovered.push({ document, depth: current.depth });
+
+      if (depth === 'recursive') {
+        getReferenceBatchChildIds(document, childIdsByParentId).forEach(childId => {
+          if (!visited.has(childId)) queue.push({ id: childId, depth: current.depth + 1 });
+        });
+      }
+    }
+
+    let scopedRecords = discovered;
+    if (includeRoot) {
+      scopedRecords = [{ document: root, depth: 0 }, ...scopedRecords];
+    }
+
+    const filteredRecords = scopedRecords.filter(({ document }) => {
+      const info = document.info || {};
+      if (typeFilter.length && !typeFilter.includes(String(info.type || '').trim())) return false;
+      if (missingImagesOnly && hasReferenceImage(info)) return false;
+      return true;
+    });
+
+    const records = filteredRecords
+      .map(({ document, depth: recordDepth }) => ({
+        ...summariseBatchReferenceRecord(document, documentsById),
+        depth: recordDepth
+      }))
+      .sort((a, b) => {
+        if (a.depth !== b.depth) return a.depth - b.depth;
+        return getReferenceLabel(a).localeCompare(getReferenceLabel(b));
+      });
+
+    res.json({
+      root: summariseBatchReferenceRecord(root, documentsById),
+      depth,
+      includeRoot,
+      typeFilter,
+      missingImagesOnly,
+      records,
+      summary: {
+        rootId,
+        discoveredCount: discovered.length,
+        returnedCount: records.length,
+        missingRelationshipTargets: [...new Set(missingRelationshipTargets)]
+      }
+    });
+  } catch (err) {
+    console.error('Error loading batch record cluster:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
 app.get('/api/reference/:id', async (req, res) => {
   try {
     const id = req.params.id;
