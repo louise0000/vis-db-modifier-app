@@ -250,26 +250,47 @@
       </div>
     </div>
 
-    <!-- Section 9: Batch record cluster review -->
+    <!-- Section 9: Batch record cluster review / edit workbench -->
     <div id="section-9" class="content-section">
       <h2>Batch Records</h2>
-      <p>Load a record cluster from a root record, review all durable fields, and prepare controlled batch edits. This first pass is read-only: no batch writes are performed here yet.</p>
+      <p>Load records from a reference hierarchy or a saved curation, edit individual records in place, and run carefully previewed repeated operations across selected records.</p>
 
       <div class="batch-records-layout">
         <div class="batch-records-panel batch-records-root-panel">
-          <h3>1. Choose a root record</h3>
+          <h3>1. Choose a source</h3>
+
+          <div class="batch-record-source-toggle" role="radiogroup" aria-label="Batch record source">
+            <label>
+              <input type="radio" name="batch-root-source" value="reference" checked>
+              Reference root
+            </label>
+            <label>
+              <input type="radio" name="batch-root-source" value="curation">
+              Saved curation
+            </label>
+          </div>
+
           <div class="batch-records-search-row">
-            <input type="text" id="batch-root-query" placeholder="Search paradigm, artist, theorist, book, ID...">
-            <button id="batch-root-search-button" type="button">Search Roots</button>
+            <select id="batch-root-type-filter" aria-label="Limit root search by type">
+              <option value="">All reference types</option>
+              <option value="paradigm">Paradigms</option>
+              <option value="artist">Artists</option>
+              <option value="theorist">Theorists</option>
+              <option value="artist,theorist">People</option>
+              <option value="artworkBook">Artwork/books</option>
+              <option value="keyword">Keywords</option>
+            </select>
+            <input type="text" id="batch-root-query" placeholder="Search root record, saved curation, or ID...">
+            <button id="batch-root-search-button" type="button">Search</button>
           </div>
           <div id="batch-root-results" class="batch-root-results"></div>
-          <div id="batch-selected-root" class="batch-selected-root">No root selected.</div>
+          <div id="batch-selected-root" class="batch-selected-root">No source selected.</div>
         </div>
 
         <div class="batch-records-panel batch-records-scope-panel">
-          <h3>2. Load the cluster</h3>
+          <h3>2. Load records</h3>
           <div class="batch-records-controls">
-            <label>
+            <label class="batch-reference-only-control">
               Scope
               <select id="batch-depth-select">
                 <option value="direct">Direct children only</option>
@@ -278,7 +299,7 @@
             </label>
 
             <label>
-              Types
+              Show
               <select id="batch-type-filter">
                 <option value="">All types</option>
                 <option value="artist,theorist">People only</option>
@@ -288,7 +309,7 @@
               </select>
             </label>
 
-            <label class="batch-checkbox-label">
+            <label class="batch-checkbox-label batch-reference-only-control">
               <input type="checkbox" id="batch-include-root">
               Include root record
             </label>
@@ -299,7 +320,7 @@
             </label>
           </div>
 
-          <button id="batch-load-cluster-button" type="button" disabled>Load Cluster</button>
+          <button id="batch-load-cluster-button" type="button" disabled>Load Records</button>
           <div id="batch-cluster-status" class="batch-cluster-status"></div>
         </div>
       </div>
@@ -307,7 +328,7 @@
       <div class="batch-records-panel batch-records-workbench">
         <div class="batch-records-workbench-header">
           <div>
-            <h3>3. Review records</h3>
+            <h3>3. Review / edit individual records</h3>
             <p id="batch-record-count">No records loaded.</p>
           </div>
           <div class="batch-records-workbench-actions">
@@ -320,8 +341,8 @@
       </div>
 
       <div class="batch-records-panel batch-records-operation-panel">
-        <h3>4. Batch operation preview</h3>
-        <p>This is deliberately non-destructive. Use it to plan operations such as adding a missing co-parent before we add a commit step.</p>
+        <h3>4. Repeated operation for selected records</h3>
+        <p>Useful for things like adding Guattari as a missing co-parent across selected Deleuze records. Preview first; commit is explicit.</p>
 
         <div class="batch-operation-grid">
           <label>
@@ -338,6 +359,7 @@
 
           <button id="batch-resolve-parent-button" type="button">Resolve Parent</button>
           <button id="batch-preview-operation-button" type="button" disabled>Preview Operation</button>
+          <button id="batch-commit-operation-button" class="batch-danger-action" type="button" disabled>Commit Reviewed Parent Add</button>
         </div>
 
         <div id="batch-parent-resolution" class="batch-parent-resolution"></div>

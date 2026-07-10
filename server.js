@@ -2386,6 +2386,199 @@ function getReferenceBatchChildIds(document = {}, childIdsByParentId = new Map()
   return [...new Set([...explicitChildren, ...reverseChildren])].filter(Boolean);
 }
 
+
+function getBatchRecordTypeFilter(value = '') {
+  return String(value || '')
+    .split(',')
+    .map(type => type.trim())
+    .filter(Boolean);
+}
+
+function summariseBatchCuration(document = {}) {
+  const curationId = document.curationId || String(document._id || '');
+  const includedNodes = Array.isArray(document.includedNodes) ? document.includedNodes : [];
+  return {
+    source: 'curation',
+    id: curationId,
+    curationId,
+    name: document.name || document.title || curationId,
+    description: document.description || '',
+    createdAt: document.createdAt || '',
+    updatedAt: document.updatedAt || document.savedAt || document.modifiedAt || '',
+    includedCount: includedNodes.length,
+    info: {
+      label: document.name || document.title || curationId,
+      type: 'curation',
+      note: document.description || ''
+    }
+  };
+}
+
+function summariseBatchRootReference(document = {}) {
+  return {
+    source: 'reference',
+    id: document.id,
+    info: document.info || {},
+    parentId: normaliseRelationshipArray(document.parentId),
+    children: normaliseRelationshipArray(document.children)
+  };
+}
+
+// Fast-ish typed source search for Batch Records. This keeps the UI from
+// always fuzzy-searching every reference record when the user knows they only
+// want paradigms / people / books, and it also introduces saved curations as a
+// selection source rather than an editable data source.
+app.get('/api/batch-records/root-search', async (req, res) => {
+  try {
+    const source = String(req.query.source || 'reference') === 'curation' ? 'curation' : 'reference';
+    const query = String(req.query.query || '').trim();
+    const typeFilter = getBatchRecordTypeFilter(req.query.types || '');
+
+    if (!query) {
+      return res.status(400).json({ message: 'Search query is required.' });
+    }
+
+    if (source === 'curation') {
+      const collection = db.collection('curation');
+      const documents = await collection
+        .find({}, {
+          projection: {
+            curationId: 1,
+            name: 1,
+            title: 1,
+            description: 1,
+            includedNodes: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            savedAt: 1,
+            modifiedAt: 1
+          }
+        })
+        .toArray();
+
+      const exactMatches = documents.filter(document => String(document.curationId || '') === query);
+      const fuse = new Fuse(documents, {
+        keys: ['name', 'title', 'description', 'curationId'],
+        threshold: 0.34,
+        ignoreLocation: true,
+        distance: 100,
+        includeScore: true
+      });
+      const fuzzyMatches = fuse.search(query).map(result => result.item);
+      const seen = new Set();
+      const results = [...exactMatches, ...fuzzyMatches]
+        .filter(document => {
+          const id = document.curationId || String(document._id || '');
+          if (!id || seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        })
+        .slice(0, 40)
+        .map(summariseBatchCuration);
+
+      return res.json({ source, results });
+    }
+
+    const collection = db.collection('reference');
+    const mongoFilter = typeFilter.length ? { 'info.type': { $in: typeFilter } } : {};
+    const documents = await collection.find(mongoFilter).toArray();
+    const exactMatches = documents.filter(document => String(document.id || '') === query);
+    const fuse = new Fuse(documents, {
+      keys: ['info.label', 'info.label_jp', 'id'],
+      threshold: 0.3,
+      ignoreLocation: true,
+      distance: 100,
+      includeScore: true
+    });
+    const fuzzyMatches = fuse.search(query).map(result => result.item);
+    const seen = new Set();
+    const results = [...exactMatches, ...fuzzyMatches]
+      .filter(document => {
+        const id = document.id;
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+      .slice(0, 40)
+      .map(summariseBatchRootReference);
+
+    res.json({ source, typeFilter, results });
+  } catch (err) {
+    console.error('Error searching batch roots:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Load canonical reference records from a saved curation. The curation is only a
+// selection source: durable edits still target the reference collection.
+app.get('/api/batch-records/curation-cluster/:id', async (req, res) => {
+  try {
+    const curationId = String(req.params.id || '').trim();
+    const missingImagesOnly = String(req.query.missingImagesOnly || '') === 'true';
+    const typeFilter = getBatchRecordTypeFilter(req.query.types || '');
+
+    if (!curationId) {
+      return res.status(400).json({ message: 'Curation id is required.' });
+    }
+
+    const curationCollection = db.collection('curation');
+    const referenceCollection = db.collection('reference');
+    const curation = await curationCollection.findOne({ curationId });
+
+    if (!curation) {
+      return res.status(404).json({ message: 'Curation not found.' });
+    }
+
+    const includedNodes = Array.isArray(curation.includedNodes) ? curation.includedNodes : [];
+    const orderedIds = [...new Set(
+      includedNodes
+        .map(node => String(node?.id || node?.info?.id || '').trim())
+        .filter(Boolean)
+    )];
+
+    const documents = orderedIds.length
+      ? await referenceCollection.find({ id: { $in: orderedIds } }).toArray()
+      : [];
+    const allRelationshipDocs = await referenceCollection.find({}).toArray();
+    const documentsById = new Map(allRelationshipDocs.map(document => [document.id, document]).filter(([id]) => id));
+    const loadedById = new Map(documents.map(document => [document.id, document]).filter(([id]) => id));
+    const missingReferenceIds = orderedIds.filter(id => !loadedById.has(id));
+
+    const records = orderedIds
+      .map((id, index) => ({ document: loadedById.get(id), index }))
+      .filter(({ document }) => document)
+      .filter(({ document }) => {
+        const info = document.info || {};
+        if (typeFilter.length && !typeFilter.includes(String(info.type || '').trim())) return false;
+        if (missingImagesOnly && hasReferenceImage(info)) return false;
+        return true;
+      })
+      .map(({ document, index }) => ({
+        ...summariseBatchReferenceRecord(document, documentsById),
+        depth: 0,
+        curationOrder: index,
+        sourceCurationId: curationId
+      }));
+
+    res.json({
+      source: 'curation',
+      curation: summariseBatchCuration(curation),
+      typeFilter,
+      missingImagesOnly,
+      records,
+      summary: {
+        curationId,
+        includedNodeCount: orderedIds.length,
+        returnedCount: records.length,
+        missingReferenceIds
+      }
+    });
+  } catch (err) {
+    console.error('Error loading curation batch records:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
 // Read-only cluster loader for the Batch Records workbench.
 // It deliberately performs no writes: it only resolves root children/descendants
 // from both sides of the reference relationship contract.
@@ -2485,6 +2678,97 @@ app.get('/api/reference/batch-records/cluster/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('Error loading batch record cluster:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+
+// Reviewed repeated operation for Batch Records: add one parent to many selected
+// records and update the parent's children array reciprocally.
+app.post('/api/reference/batch-records/add-parent', async (req, res) => {
+  try {
+    const parentId = String(req.body?.parentId || '').trim();
+    const recordIds = [...new Set(
+      (Array.isArray(req.body?.recordIds) ? req.body.recordIds : [])
+        .map(id => String(id || '').trim())
+        .filter(Boolean)
+    )];
+
+    if (!parentId) {
+      return res.status(400).json({ message: 'parentId is required.' });
+    }
+
+    if (!recordIds.length) {
+      return res.status(400).json({ message: 'At least one record id is required.' });
+    }
+
+    const collection = db.collection('reference');
+    const parent = await collection.findOne({ id: parentId });
+
+    if (!parent) {
+      return res.status(404).json({ message: 'Parent record not found.' });
+    }
+
+    const records = await collection.find({ id: { $in: recordIds } }).toArray();
+    const recordsById = new Map(records.map(document => [document.id, document]).filter(([id]) => id));
+    const operations = [];
+    const changedRecordIds = [];
+    const rows = recordIds.map(id => {
+      if (id === parentId) return { id, status: 'skipped-self-parent' };
+      const record = recordsById.get(id);
+      if (!record) return { id, status: 'missing-record' };
+      const parentIds = normaliseRelationshipArray(record.parentId);
+      if (parentIds.includes(parentId)) return { id, status: 'already-present' };
+      const nextParentIds = [...parentIds, parentId];
+      operations.push({
+        updateOne: {
+          filter: { id },
+          update: { $set: { parentId: nextParentIds } }
+        }
+      });
+      changedRecordIds.push(id);
+      return { id, status: 'parent-added', parentId: nextParentIds };
+    });
+
+    const parentChildren = normaliseRelationshipArray(parent.children);
+    const nextParentChildren = [...new Set([...parentChildren, ...changedRecordIds])];
+    const parentChildrenChanged = nextParentChildren.length !== parentChildren.length;
+
+    if (parentChildrenChanged) {
+      operations.push({
+        updateOne: {
+          filter: { id: parentId },
+          update: { $set: { children: nextParentChildren } }
+        }
+      });
+    }
+
+    if (operations.length) {
+      await collection.bulkWrite(operations);
+    }
+
+    const allDocuments = await collection.find({}).toArray();
+    const documentsById = new Map(allDocuments.map(document => [document.id, document]).filter(([id]) => id));
+    const updatedRecords = changedRecordIds
+      .map(id => documentsById.get(id))
+      .filter(Boolean)
+      .map(document => summariseBatchReferenceRecord(document, documentsById));
+
+    res.json({
+      message: `Batch parent add complete: ${changedRecordIds.length} record${changedRecordIds.length === 1 ? '' : 's'} changed${parentChildrenChanged ? '; parent children list updated' : ''}.`,
+      rows,
+      updatedRecords,
+      parentChildrenChanged,
+      summary: {
+        requestedCount: recordIds.length,
+        changedCount: changedRecordIds.length,
+        noopCount: rows.filter(row => row.status === 'already-present').length,
+        missingCount: rows.filter(row => row.status === 'missing-record').length,
+        skippedSelfParentCount: rows.filter(row => row.status === 'skipped-self-parent').length
+      }
+    });
+  } catch (err) {
+    console.error('Error applying batch parent add:', err);
     res.status(500).json({ error: err.toString() });
   }
 });
@@ -2922,7 +3206,13 @@ app.put('/api/reference/update/:id', async (req, res) => {
       const result = await collection.updateOne({ id }, { $set: setFields });
 
       if (result.matchedCount === 1) {
-          res.json({ message: result.modifiedCount === 1 ? 'Record updated successfully.' : 'Record found; no changes were needed.' });
+          const updatedRecord = await collection.findOne({ id });
+          const documents = await collection.find({}).toArray();
+          const documentsById = new Map(documents.map(document => [document.id, document]).filter(([recordId]) => recordId));
+          res.json({
+              message: result.modifiedCount === 1 ? 'Record updated successfully.' : 'Record found; no changes were needed.',
+              record: summariseBatchReferenceRecord(updatedRecord, documentsById)
+          });
       } else {
           res.status(404).json({ message: 'Record not found.' });
       }
