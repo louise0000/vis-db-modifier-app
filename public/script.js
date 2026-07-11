@@ -6898,7 +6898,6 @@ async function previewCsvImport() {
 
     csvImportState.busy = true;
     updateCsvImportCommitAvailability();
-    openCsvImportCommitProgressModal(active.length);
 
     try {
         const text = await file.text();
