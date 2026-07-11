@@ -27,7 +27,7 @@ const app = express();
 const port = 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '12mb' }));
 
 // Serve static files from the 'public' directory
 app.use(express.static('public'));
@@ -87,6 +87,10 @@ function hasMeaningfulImportValue(value) {
   if (value === undefined || value === null) return false;
   if (Array.isArray(value)) return value.length > 0;
   return String(value).trim() !== '';
+}
+
+function escapeRegExp(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function buildImportTypeColorDefaults(documents = []) {
@@ -2222,6 +2226,142 @@ app.post('/api/reference/image-queue/upload-local-image-candidate', async (req, 
   }
 });
 
+// Upload a browser-selected local file directly to Google Cloud Storage. This is used
+// by Add Single Record and Search/Edit Records as a GUI bridge from a local file to
+// the app's cloud image URL field. It accepts base64 JSON to avoid adding multipart
+// middleware to this small local maintenance app.
+app.post('/api/reference/image-queue/upload-file', async (req, res) => {
+  try {
+    const fileName = String(req.body?.fileName || 'uploaded-image').trim();
+    const contentType = String(req.body?.contentType || '').split(';')[0].trim();
+    const base64Data = String(req.body?.base64Data || '').trim();
+    const recordId = String(req.body?.recordId || '').trim();
+    const label = String(req.body?.label || recordId || 'uploaded-image').trim() || 'uploaded-image';
+    const type = String(req.body?.type || 'manual-upload').trim() || 'manual-upload';
+    const writeToRecord = Boolean(req.body?.writeToRecord);
+
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      return res.status(415).json({ error: 'Uploaded file must have an image/* content type.' });
+    }
+
+    if (!base64Data) {
+      return res.status(400).json({ error: 'base64Data is required.' });
+    }
+
+    let buffer;
+    try {
+      buffer = Buffer.from(base64Data, 'base64');
+    } catch (err) {
+      return res.status(400).json({ error: 'base64Data could not be decoded.' });
+    }
+
+    if (!buffer.length || buffer.length < 128) {
+      return res.status(422).json({ error: 'Uploaded file is too small to be a plausible image.' });
+    }
+
+    if (buffer.length > IMAGE_CANDIDATE_MAX_BYTES) {
+      return res.status(413).json({ error: 'Uploaded image is larger than the 8 MB limit.' });
+    }
+
+    const config = getImageQueueCloudConfigStatus();
+    if (!config.hasGoogleStoragePackage) {
+      return res.status(503).json({ error: 'Google Cloud Storage package is not installed. Run: npm install @google-cloud/storage' });
+    }
+
+    if (!config.hasBucket) {
+      return res.status(503).json({ error: 'Set GCS_IMAGE_BUCKET or GCS_BUCKET_NAME in .env before uploading images.' });
+    }
+
+    if (!config.hasImageKitEndpoint) {
+      return res.status(503).json({ error: 'Set IMAGEKIT_URL_ENDPOINT in .env before saving an ImageKit delivery URL.' });
+    }
+
+    let record = null;
+    if (writeToRecord) {
+      if (!recordId) {
+        return res.status(400).json({ error: 'recordId is required when writeToRecord is true.' });
+      }
+      record = await db.collection('reference').findOne({ id: recordId });
+      if (!record) {
+        return res.status(404).json({ error: 'Record not found.' });
+      }
+    }
+
+    const ext = getImageExtensionFromContentType(contentType) || path.extname(fileName).replace(/^\./, '') || 'jpg';
+    const objectName = safeJoinUrlParts(
+      config.gcsImagePrefix,
+      type,
+      `${slugifyImageCandidateLabel(label)}-${recordId || uuidv4()}.${ext}`
+    );
+
+    const storage = new GoogleCloudStorage();
+    const bucket = storage.bucket(config.bucket);
+    await bucket.file(objectName).save(buffer, {
+      metadata: {
+        contentType,
+        metadata: {
+          sourceUrl: 'local-file-upload',
+          originalFileName: fileName,
+          recordId: recordId || '',
+          recordLabel: label
+        }
+      }
+    });
+
+    const deliveryUrl = buildImageKitDeliveryUrl(objectName);
+    const savedAt = new Date().toISOString();
+    const imageSource = {
+      method: 'local-file-upload',
+      provider: 'local-file',
+      selectedAt: savedAt,
+      originalFileName: fileName,
+      originalImageUrl: 'local-file-upload',
+      downloadedFinalUrl: '',
+      sourcePageUrl: '',
+      source: 'local-file-upload',
+      title: fileName,
+      searchQuery: '',
+      thumbnailUrl: '',
+      gcsBucket: config.bucket,
+      gcsObjectName: objectName,
+      imageKitUrl: deliveryUrl,
+      contentType,
+      sizeBytes: buffer.length
+    };
+
+    if (writeToRecord && record) {
+      const previousSourceMeta = record.sourceMeta && typeof record.sourceMeta === 'object' && !Array.isArray(record.sourceMeta)
+        ? record.sourceMeta
+        : {};
+      await db.collection('reference').updateOne(
+        { id: recordId },
+        {
+          $set: {
+            'info.imgURL': deliveryUrl,
+            sourceMeta: {
+              ...previousSourceMeta,
+              imageSource
+            }
+          }
+        }
+      );
+    }
+
+    res.json({
+      success: true,
+      recordId,
+      imgURL: deliveryUrl,
+      gcsBucket: config.bucket,
+      gcsObjectName: objectName,
+      imageSource
+    });
+  } catch (err) {
+    console.error('Error uploading local file image:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+
 // Upload a previously validated local image candidate to Google Cloud Storage,
 // construct the corresponding ImageKit delivery URL, and save it as info.imgURL.
 app.post('/api/reference/image-queue/finalise-image-candidate', async (req, res) => {
@@ -3250,6 +3390,99 @@ app.post('/api/reference/import-review/commit', async (req, res) => {
     });
   } catch (err) {
     console.error('Error committing CSV import:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+
+// Create an unarranged saved curation from canonical reference records.
+// The modifier app only creates the selection shell; visual positions remain the
+// responsibility of the vis app.
+app.post('/api/curations/from-records', async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const description = String(req.body?.description || '').trim();
+    const source = String(req.body?.source || 'modifier').trim();
+    const recordIds = [...new Set(
+      (Array.isArray(req.body?.recordIds) ? req.body.recordIds : [])
+        .map(id => String(id || '').trim())
+        .filter(Boolean)
+    )];
+
+    if (!name) {
+      return res.status(400).json({ message: 'Curation name is required.' });
+    }
+    if (!recordIds.length) {
+      return res.status(400).json({ message: 'At least one reference record id is required.' });
+    }
+
+    const referenceCollection = db.collection('reference');
+    const curationCollection = db.collection('curation');
+
+    const duplicate = await curationCollection.findOne({
+      name: { $regex: `^${escapeRegExp(name)}$`, $options: 'i' }
+    });
+    if (duplicate) {
+      return res.status(409).json({
+        message: 'A saved curation with this name already exists.',
+        curationId: duplicate.curationId || String(duplicate._id || '')
+      });
+    }
+
+    const records = await referenceCollection.find(
+      { id: { $in: recordIds } },
+      { projection: { id: 1, 'info.color': 1 } }
+    ).toArray();
+    const foundIds = new Set(records.map(record => record.id).filter(Boolean));
+    const missingRecordIds = recordIds.filter(id => !foundIds.has(id));
+    const recordById = new Map(records.map(record => [record.id, record]));
+
+    const includedNodes = recordIds
+      .filter(id => foundIds.has(id))
+      .map(id => {
+        const record = recordById.get(id) || {};
+        const color = String(record?.info?.color || '').trim();
+        return color
+          ? { id, position: {}, color }
+          : { id, position: {} };
+      });
+
+    if (!includedNodes.length) {
+      return res.status(400).json({ message: 'None of the supplied record ids exist in the reference database.' });
+    }
+
+    const now = new Date().toISOString();
+    const curation = {
+      curationId: uuidv4(),
+      name,
+      description,
+      includedNodes,
+      customConnections: [],
+      curationConnections: [],
+      curationSubtypes: [],
+      visualSettings: {},
+      importedCurationSources: [],
+      sourceMeta: {
+        createdBy: 'modifier-app',
+        source,
+        recordCount: includedNodes.length,
+        missingRecordIds
+      },
+      createdAt: now,
+      updatedAt: now
+    };
+
+    await curationCollection.insertOne(curation);
+
+    res.status(201).json({
+      success: true,
+      curationId: curation.curationId,
+      name: curation.name,
+      includedCount: includedNodes.length,
+      missingRecordIds
+    });
+  } catch (err) {
+    console.error('Error creating curation from records:', err);
     res.status(500).json({ error: err.toString() });
   }
 });

@@ -244,6 +244,10 @@
       <div id="csv-import-summary"></div>
       <div id="csv-import-candidates"></div>
 
+      <div class="csv-import-followup-note">
+        After commit, this screen can optionally create an unarranged saved diagram from the committed records and/or send missing-image people/books to the Image Queue.
+      </div>
+
       <div class="csv-import-commit-bar">
         <button id="csv-import-commit" type="button" disabled>Commit Reviewed Rows</button>
         <span id="csv-import-commit-status"></span>
@@ -414,6 +418,51 @@
 
 
 
+
+
+
+  <div id="csv-import-followup-modal" class="csv-import-followup-modal hidden" role="dialog" aria-modal="true" aria-labelledby="csv-import-followup-title">
+    <div class="csv-import-followup-dialog">
+      <div class="csv-import-followup-header">
+        <div>
+          <h2 id="csv-import-followup-title">CSV import follow-up</h2>
+          <p id="csv-import-followup-summary">Import committed.</p>
+        </div>
+        <button id="csv-import-followup-close" type="button" aria-label="Close follow-up">×</button>
+      </div>
+
+      <div class="csv-import-followup-grid">
+        <section class="csv-import-followup-section">
+          <h3>Create saved diagram</h3>
+          <p>Create an unarranged curation from the committed database records. The visual app can load it and let you arrange positions later.</p>
+          <label class="csv-import-followup-field">
+            <span>Curation name</span>
+            <input id="csv-import-followup-curation-name" type="text" placeholder="e.g. Imported Deleuze / Guattari books">
+          </label>
+          <div class="csv-import-followup-checkboxes">
+            <label><input id="csv-import-followup-include-created" type="checkbox" checked> include created records</label>
+            <label><input id="csv-import-followup-include-merged" type="checkbox" checked> include merged records</label>
+          </div>
+        </section>
+
+        <section class="csv-import-followup-section">
+          <h3>Image queue</h3>
+          <p>Send committed records without images to the existing Image Queue for SerpAPI review/upload.</p>
+          <div class="csv-import-followup-checkboxes">
+            <label><input id="csv-import-followup-queue-people" type="checkbox"> people</label>
+            <label><input id="csv-import-followup-queue-artworkbooks" type="checkbox"> artwork/books</label>
+          </div>
+        </section>
+      </div>
+
+      <div id="csv-import-followup-status" class="csv-import-followup-status"></div>
+
+      <div class="csv-import-followup-actions">
+        <button id="csv-import-followup-done" type="button">Done</button>
+        <button id="csv-import-followup-apply" type="button">Apply follow-up</button>
+      </div>
+    </div>
+  </div>
 
   <script src="script.js"></script>
 </body>

@@ -466,6 +466,525 @@ function renderEditImagePreview(container, info = {}) {
     return { update };
 }
 
+
+function ensureEditableImageField(info = {}) {
+    const nextInfo = ensureJapaneseNoteField({ ...info });
+    if (!EDIT_IMAGE_FIELDS.some(key => Object.prototype.hasOwnProperty.call(nextInfo, key))) {
+        nextInfo.imgURL = '';
+    }
+    return nextInfo;
+}
+
+function getPreferredImageFieldKey(info = {}) {
+    const existingKey = EDIT_IMAGE_FIELDS.find(key => Object.prototype.hasOwnProperty.call(info, key));
+    return existingKey || 'imgURL';
+}
+
+function fileToBase64Payload(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = String(reader.result || '');
+            const commaIndex = result.indexOf(',');
+            resolve(commaIndex === -1 ? result : result.slice(commaIndex + 1));
+        };
+        reader.onerror = () => reject(reader.error || new Error('Could not read file.'));
+        reader.readAsDataURL(file);
+    });
+}
+
+function createSingleRecordImageState(recordSnapshot = {}) {
+    const record = normaliseImageQueueRecord(recordSnapshot);
+    return {
+        ...record,
+        statusMessage: '',
+        statusError: '',
+        localFileUploadStatus: '',
+        localFileUploadError: '',
+        localFileUploadCloud: null,
+        selectedImageCandidateDownload: record.selectedImageCandidateDownload || null,
+        selectedImageCandidateCloud: record.selectedImageCandidateCloud || null
+    };
+}
+
+function createSingleRecordImageTool(container, options = {}) {
+    if (!container) return null;
+
+    const panel = document.createElement('section');
+    panel.classList.add('single-record-image-tool');
+    panel.dataset.context = options.context || 'record';
+
+    const heading = document.createElement('h4');
+    heading.textContent = options.title || 'Image tools';
+    panel.appendChild(heading);
+
+    const help = document.createElement('p');
+    help.classList.add('single-record-image-help');
+    help.textContent = options.helpText || 'Search SerpAPI candidates or upload a local image file to cloud storage, then set this record’s imgURL.';
+    panel.appendChild(help);
+
+    const body = document.createElement('div');
+    panel.appendChild(body);
+    container.appendChild(panel);
+
+    let state = createSingleRecordImageState(options.getRecordSnapshot ? options.getRecordSnapshot() : {});
+    let renderQueued = false;
+
+    const setImageUrl = (url) => {
+        if (typeof options.setImageUrl === 'function') {
+            options.setImageUrl(url);
+        }
+        state.imgURL = url;
+    };
+
+    const queueRender = () => {
+        if (renderQueued) return;
+        renderQueued = true;
+        window.requestAnimationFrame(() => {
+            renderQueued = false;
+            render();
+        });
+    };
+
+    const refreshStateFromForm = () => {
+        const fresh = createSingleRecordImageState(options.getRecordSnapshot ? options.getRecordSnapshot() : {});
+        state = {
+            ...state,
+            ...fresh,
+            imageCandidates: state.imageCandidates || [],
+            imageCandidateDetails: state.imageCandidateDetails || [],
+            selectedImageCandidateUrl: state.selectedImageCandidateUrl || '',
+            selectedImageCandidateDownload: state.selectedImageCandidateDownload || null,
+            selectedImageCandidateCloud: state.selectedImageCandidateCloud || null,
+            imageCandidateFetchStatus: state.imageCandidateFetchStatus || '',
+            imageCandidateFetchError: state.imageCandidateFetchError || '',
+            imageCandidateDownloadStatus: state.imageCandidateDownloadStatus || '',
+            imageCandidateDownloadError: state.imageCandidateDownloadError || '',
+            imageCandidateCloudStatus: state.imageCandidateCloudStatus || '',
+            imageCandidateCloudError: state.imageCandidateCloudError || '',
+            lastImageCandidateQuery: state.lastImageCandidateQuery || '',
+            imageSearchExtraTerms: state.imageSearchExtraTerms || '',
+            localFileUploadStatus: state.localFileUploadStatus || '',
+            localFileUploadError: state.localFileUploadError || '',
+            localFileUploadCloud: state.localFileUploadCloud || null
+        };
+    };
+
+    const fetchCandidates = async (queryInput) => {
+        refreshStateFromForm();
+        const query = String(queryInput?.value || buildImageSearchQuery(state)).trim();
+        if (!query) {
+            alert('Enter an image search query first.');
+            return;
+        }
+
+        state.imageCandidateFetchStatus = 'fetching';
+        state.imageCandidateFetchError = '';
+        state.statusMessage = `Fetching SerpAPI candidates for: ${query}`;
+        queueRender();
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/image-queue/serpapi-image-candidates`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query,
+                    recordId: state.id || 'draft',
+                    label: state.label,
+                    type: state.type,
+                    limit: 5
+                })
+            });
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(payload?.error || `SerpAPI image search failed with status ${response.status}.`);
+
+            const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+            state.imageCandidateDetails = candidates.slice(0, 5);
+            state.imageCandidates = candidates.map(candidate => candidate.imageUrl).filter(Boolean).slice(0, 5);
+            state.selectedImageCandidateUrl = '';
+            clearImageCandidateDownloadState(state);
+            state.imageCandidateFetchStatus = state.imageCandidates.length ? 'loaded' : 'empty';
+            state.imageCandidateFetchError = state.imageCandidates.length ? '' : 'No image candidates returned.';
+            state.lastImageCandidateQuery = payload?.query || query;
+            state.statusMessage = state.imageCandidates.length
+                ? `Loaded ${state.imageCandidates.length} image candidate${state.imageCandidates.length === 1 ? '' : 's'}.`
+                : 'SerpAPI returned no image candidates.';
+        } catch (error) {
+            console.error('Error fetching single-record image candidates:', error);
+            state.imageCandidateFetchStatus = 'error';
+            state.imageCandidateFetchError = error.message || String(error);
+            state.statusMessage = '';
+        }
+        queueRender();
+    };
+
+    const validateCandidate = async () => {
+        if (!state.selectedImageCandidateUrl) {
+            alert('Select an image candidate first.');
+            return;
+        }
+        state.imageCandidateDownloadStatus = 'downloading';
+        state.imageCandidateDownloadError = '';
+        state.selectedImageCandidateDownload = null;
+        queueRender();
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/image-queue/validate-image-candidate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    imageUrl: state.selectedImageCandidateUrl,
+                    recordId: state.id || 'draft',
+                    label: state.label
+                })
+            });
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(payload?.error || `Image validation failed with status ${response.status}.`);
+            state.selectedImageCandidateDownload = payload;
+            state.imageCandidateDownloadStatus = 'downloaded';
+            state.imageCandidateDownloadError = '';
+            clearImageCandidateCloudState(state);
+        } catch (error) {
+            console.error('Error validating single-record image candidate:', error);
+            state.imageCandidateDownloadStatus = 'error';
+            state.imageCandidateDownloadError = error.message || String(error);
+            state.selectedImageCandidateDownload = null;
+        }
+        queueRender();
+    };
+
+    const saveCandidate = async () => {
+        if (!state.selectedImageCandidateUrl || !state.selectedImageCandidateDownload?.previewUrl) {
+            alert('Validate/download a selected candidate before saving.');
+            return;
+        }
+        const writesDirectly = Boolean(options.writeToRecord && state.id);
+        const confirmed = confirm(writesDirectly
+            ? 'Upload this image to cloud storage and save it directly to this existing record?'
+            : 'Upload this image to cloud storage and set the imgURL field in this form?');
+        if (!confirmed) return;
+
+        state.imageCandidateCloudStatus = 'uploading';
+        state.imageCandidateCloudError = '';
+        queueRender();
+
+        try {
+            const detail = getImageCandidateDetail(state, state.selectedImageCandidateUrl);
+            const endpoint = writesDirectly
+                ? `${baseURL}/api/reference/image-queue/finalise-image-candidate`
+                : `${baseURL}/api/reference/image-queue/upload-local-image-candidate`;
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    recordId: state.id,
+                    label: state.label,
+                    type: state.type,
+                    selectedImageCandidateUrl: state.selectedImageCandidateUrl,
+                    selectedImageCandidateDownload: state.selectedImageCandidateDownload,
+                    selectedImageCandidateMeta: detail
+                })
+            });
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(payload?.error || `Cloud image save failed with status ${response.status}.`);
+            state.selectedImageCandidateCloud = payload;
+            state.imageCandidateCloudStatus = 'saved';
+            state.imageCandidateCloudError = '';
+            if (payload?.imgURL) setImageUrl(payload.imgURL);
+        } catch (error) {
+            console.error('Error saving single-record image candidate:', error);
+            state.imageCandidateCloudStatus = 'error';
+            state.imageCandidateCloudError = error.message || String(error);
+        }
+        queueRender();
+    };
+
+    const uploadLocalFile = async (fileInput) => {
+        refreshStateFromForm();
+        const file = fileInput?.files?.[0];
+        if (!file) {
+            alert('Choose an image file first.');
+            return;
+        }
+        if (!String(file.type || '').startsWith('image/')) {
+            alert('Choose an image file.');
+            return;
+        }
+        if (file.size > 8 * 1024 * 1024) {
+            alert('Image file is larger than the 8 MB limit.');
+            return;
+        }
+
+        const writesDirectly = Boolean(options.writeToRecord && state.id);
+        const confirmed = confirm(writesDirectly
+            ? `Upload ${file.name} to cloud storage and save it directly to this record?`
+            : `Upload ${file.name} to cloud storage and set the imgURL field in this form?`);
+        if (!confirmed) return;
+
+        state.localFileUploadStatus = 'uploading';
+        state.localFileUploadError = '';
+        state.localFileUploadCloud = null;
+        queueRender();
+
+        try {
+            const base64Data = await fileToBase64Payload(file);
+            const response = await fetch(`${baseURL}/api/reference/image-queue/upload-file`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fileName: file.name,
+                    contentType: file.type,
+                    base64Data,
+                    recordId: state.id,
+                    label: state.label,
+                    type: state.type,
+                    writeToRecord: writesDirectly
+                })
+            });
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(payload?.error || `Local file upload failed with status ${response.status}.`);
+            state.localFileUploadCloud = payload;
+            state.localFileUploadStatus = 'saved';
+            if (payload?.imgURL) setImageUrl(payload.imgURL);
+        } catch (error) {
+            console.error('Error uploading local image file:', error);
+            state.localFileUploadStatus = 'error';
+            state.localFileUploadError = error.message || String(error);
+        }
+        queueRender();
+    };
+
+    function renderCandidateGrid() {
+        const wrap = document.createElement('div');
+        wrap.classList.add('single-record-image-candidates');
+
+        if (!state.imageCandidates.length) {
+            const empty = document.createElement('p');
+            empty.classList.add('single-record-image-status');
+            empty.textContent = state.imageCandidateFetchStatus === 'empty'
+                ? 'No candidates returned.'
+                : 'No SerpAPI candidates loaded yet.';
+            wrap.appendChild(empty);
+            return wrap;
+        }
+
+        const status = document.createElement('p');
+        status.classList.add('single-record-image-status');
+        status.textContent = state.selectedImageCandidateUrl
+            ? 'Candidate selected. Validate first, then save to cloud.'
+            : 'Choose one candidate.';
+        wrap.appendChild(status);
+
+        const grid = document.createElement('div');
+        grid.classList.add('image-candidate-grid');
+        state.imageCandidates.forEach((url, index) => {
+            const detail = getImageCandidateDetail(state, url) || {};
+            const card = document.createElement('div');
+            card.classList.add('image-candidate-card');
+            if (state.selectedImageCandidateUrl === url) card.classList.add('selected');
+
+            const imageWrap = document.createElement('div');
+            imageWrap.classList.add('image-candidate-image-wrap');
+            const image = document.createElement('img');
+            image.classList.add('image-candidate-preview-image');
+            image.src = detail.thumbnailUrl || url;
+            image.alt = detail.title || `${state.label || 'Record'} candidate ${index + 1}`;
+            imageWrap.appendChild(image);
+            const dimensions = document.createElement('span');
+            dimensions.classList.add('image-candidate-dimensions');
+            dimensions.textContent = formatImageCandidateDimensions(detail);
+            imageWrap.appendChild(dimensions);
+            card.appendChild(imageWrap);
+
+            const actions = document.createElement('div');
+            actions.classList.add('image-candidate-card-actions');
+            const selectButton = document.createElement('button');
+            selectButton.type = 'button';
+            selectButton.textContent = state.selectedImageCandidateUrl === url ? 'Selected' : 'Select';
+            selectButton.addEventListener('click', () => {
+                if (state.selectedImageCandidateUrl !== url) clearImageCandidateDownloadState(state);
+                state.selectedImageCandidateUrl = url;
+                queueRender();
+            });
+            actions.appendChild(selectButton);
+            const openLink = document.createElement('a');
+            openLink.href = url;
+            openLink.target = '_blank';
+            openLink.rel = 'noopener noreferrer';
+            openLink.textContent = 'Open';
+            actions.appendChild(openLink);
+            card.appendChild(actions);
+
+            const text = document.createElement('div');
+            text.classList.add('image-candidate-url-text');
+            text.textContent = [detail.source, detail.title].filter(Boolean).join(' · ') || url;
+            card.appendChild(text);
+            grid.appendChild(card);
+        });
+        wrap.appendChild(grid);
+        return wrap;
+    }
+
+    function render() {
+        refreshStateFromForm();
+        body.innerHTML = '';
+
+        const currentUrl = state.imgURL || '';
+        if (currentUrl) {
+            const current = document.createElement('p');
+            current.classList.add('single-record-image-status');
+            current.innerHTML = '<strong>Current imgURL:</strong> ';
+            const link = document.createElement('a');
+            link.href = currentUrl;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = currentUrl;
+            current.appendChild(link);
+            body.appendChild(current);
+        }
+
+        const searchRow = document.createElement('div');
+        searchRow.classList.add('single-record-image-search-row');
+        const queryInput = document.createElement('input');
+        queryInput.type = 'text';
+        queryInput.value = state.lastImageCandidateQuery || buildImageSearchQuery(state);
+        queryInput.placeholder = 'SerpAPI image search query';
+        searchRow.appendChild(queryInput);
+        const fetchButton = document.createElement('button');
+        fetchButton.type = 'button';
+        fetchButton.textContent = state.imageCandidateFetchStatus === 'fetching' ? 'Fetching...' : 'Fetch SerpAPI Candidates';
+        fetchButton.disabled = state.imageCandidateFetchStatus === 'fetching';
+        fetchButton.addEventListener('click', () => fetchCandidates(queryInput));
+        searchRow.appendChild(fetchButton);
+        body.appendChild(searchRow);
+
+        const uploadRow = document.createElement('div');
+        uploadRow.classList.add('single-record-image-upload-row');
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = 'image/*';
+        uploadRow.appendChild(fileInput);
+        const uploadButton = document.createElement('button');
+        uploadButton.type = 'button';
+        uploadButton.textContent = state.localFileUploadStatus === 'uploading' ? 'Uploading...' : 'Upload Local File to Cloud';
+        uploadButton.disabled = state.localFileUploadStatus === 'uploading';
+        uploadButton.addEventListener('click', () => uploadLocalFile(fileInput));
+        uploadRow.appendChild(uploadButton);
+        body.appendChild(uploadRow);
+
+        if (state.statusMessage || state.imageCandidateFetchError || state.localFileUploadError) {
+            const status = document.createElement('p');
+            status.classList.add('single-record-image-status');
+            if (state.imageCandidateFetchError || state.localFileUploadError) status.classList.add('single-record-image-error');
+            status.textContent = state.imageCandidateFetchError || state.localFileUploadError || state.statusMessage;
+            body.appendChild(status);
+        }
+
+        body.appendChild(renderCandidateGrid());
+
+        const localPreview = renderLocalImageCandidatePreview(state.selectedImageCandidateDownload);
+        if (localPreview) body.appendChild(localPreview);
+        const cloudResult = renderCloudImageCandidateResult(state.selectedImageCandidateCloud || state.localFileUploadCloud);
+        if (cloudResult) body.appendChild(cloudResult);
+
+        const actionRow = document.createElement('div');
+        actionRow.classList.add('single-record-image-actions');
+        const validateButton = document.createElement('button');
+        validateButton.type = 'button';
+        validateButton.textContent = state.imageCandidateDownloadStatus === 'downloading' ? 'Validating...' : 'Validate Selected Candidate';
+        validateButton.disabled = !state.selectedImageCandidateUrl || state.imageCandidateDownloadStatus === 'downloading';
+        validateButton.addEventListener('click', validateCandidate);
+        actionRow.appendChild(validateButton);
+
+        const saveButton = document.createElement('button');
+        saveButton.type = 'button';
+        saveButton.textContent = state.imageCandidateCloudStatus === 'uploading' ? 'Saving...' : (options.writeToRecord ? 'Save Selected Candidate to Record' : 'Upload Selected Candidate + Set imgURL');
+        saveButton.disabled = !state.selectedImageCandidateDownload?.previewUrl || state.imageCandidateCloudStatus === 'uploading';
+        saveButton.addEventListener('click', saveCandidate);
+        actionRow.appendChild(saveButton);
+        body.appendChild(actionRow);
+    }
+
+    render();
+    return { render, getState: () => state };
+}
+
+function ensureAddFormImageField() {
+    const form = document.getElementById('new-record-form');
+    const formFields = document.getElementById('form-fields');
+    if (!form || !formFields) return null;
+    let field = form.querySelector('[name="imgURL"], [name="imgUrl"], [name="imageURL"], [name="imageUrl"], [name="image_url"], [name="image"]');
+    if (!field) {
+        appendFormField(formFields, 'imgURL', '');
+        field = form.querySelector('[name="imgURL"]');
+    }
+    return field;
+}
+
+function setAddFormImageUrl(imageUrl = '') {
+    const field = ensureAddFormImageField();
+    if (!field) return false;
+    field.value = imageUrl;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+}
+
+function getAddFormImageSnapshot() {
+    const form = document.getElementById('new-record-form');
+    const info = {};
+    if (form) {
+        new FormData(form).forEach((value, key) => {
+            if (!ROOT_RELATIONSHIP_FIELDS.has(key)) info[key] = value;
+        });
+    }
+    if (!info.type) info.type = document.getElementById('type-select')?.value || '';
+    return { id: '', info };
+}
+
+function renderAddSingleRecordImageTool() {
+    const form = document.getElementById('new-record-form');
+    const formFields = document.getElementById('form-fields');
+    if (!form || !formFields) return;
+    ensureAddFormImageField();
+    form.querySelector('#add-single-image-tool')?.remove();
+
+    const panelHost = document.createElement('div');
+    panelHost.id = 'add-single-image-tool';
+    formFields.insertAdjacentElement('afterend', panelHost);
+
+    createSingleRecordImageTool(panelHost, {
+        context: 'add',
+        title: 'Image tools for this new record',
+        helpText: 'Optional: fetch SerpAPI candidates or upload a local image to cloud storage, then set the form imgURL before adding the record.',
+        getRecordSnapshot: getAddFormImageSnapshot,
+        setImageUrl: setAddFormImageUrl,
+        writeToRecord: false
+    });
+}
+
+function getEditImageSnapshot(recordId, ulElement) {
+    const info = {};
+    ulElement.querySelectorAll('li[data-info-key]').forEach(row => {
+        const key = row.dataset.infoKey;
+        const span = row.querySelector('span[contenteditable="true"]');
+        if (key && span) info[key] = span.textContent;
+    });
+    return { id: recordId, info };
+}
+
+function setEditImageUrl(ulElement, imagePreview, imageUrl = '') {
+    let span = null;
+    for (const key of EDIT_IMAGE_FIELDS) {
+        span = ulElement.querySelector(`li[data-info-key="${key}"] span[contenteditable="true"]`);
+        if (span) break;
+    }
+    if (!span) return false;
+    span.textContent = imageUrl;
+    span.dispatchEvent(new Event('input', { bubbles: true }));
+    imagePreview?.update?.(imageUrl);
+    return true;
+}
+
 function renderRootSourceMetaPanel(container, sourceMeta = {}) {
     if (!objectHasDisplayableFields(sourceMeta)) return;
 
@@ -1681,7 +2200,7 @@ async function handleEditRecord(data) {
 
     const fullRecord = await fetchFullRecordForEdit(data);
     const recordId = fullRecord.id || data.id || fullRecord.info?.id;
-    const originalInfo = fullRecord.info || data.info || {};
+    const originalInfo = ensureEditableImageField(fullRecord.info || data.info || {});
     const ulElement = document.createElement('ul');
 
     const relationshipEditors = renderEditRecordMetadata(editRecord, fullRecord);
@@ -1689,12 +2208,14 @@ async function handleEditRecord(data) {
 
     for (const [key, value] of getInfoEntriesWithJapaneseNote(originalInfo)) {
         const li = document.createElement('li');
+        li.dataset.infoKey = key;
 
         const strong = document.createElement('strong');
         strong.textContent = `${key}:`;
 
         const span = document.createElement('span');
         span.contentEditable = 'true';
+        span.dataset.infoKey = key;
         span.textContent = formatValueForEditor(value);
 
         if (MULTILINE_INFO_FIELDS.has(key)) {
@@ -1713,6 +2234,14 @@ async function handleEditRecord(data) {
     }
 
     editRecord.appendChild(ulElement);
+    createSingleRecordImageTool(editRecord, {
+        context: 'edit',
+        title: 'Image tools for this existing record',
+        helpText: 'Fetch SerpAPI candidates or upload a local image file, then save the chosen image directly to this canonical database record.',
+        getRecordSnapshot: () => getEditImageSnapshot(recordId, ulElement),
+        setImageUrl: (imageUrl) => setEditImageUrl(ulElement, imagePreview, imageUrl),
+        writeToRecord: true
+    });
     renderRootSourceMetaPanel(editRecord, fullRecord.sourceMeta);
     editSection.style.display = 'block';
 
@@ -1968,7 +2497,8 @@ function generateForm(template) {
     const formFields = document.getElementById('form-fields');
     formFields.innerHTML = ''; // Clear any previous fields
 
-    for (const [key, value] of getInfoEntriesWithJapaneseNote(template.info || {})) {
+    const editableInfo = ensureEditableImageField(template.info || {});
+    for (const [key, value] of getInfoEntriesWithJapaneseNote(editableInfo)) {
         appendFormField(formFields, key, value);
     }
 
@@ -1997,6 +2527,8 @@ function generateForm(template) {
         formFields.appendChild(input);
         formFields.appendChild(document.createElement('br'));
     }
+
+    renderAddSingleRecordImageTool();
 }
 
 // DELETE FUNCTIONS
@@ -3171,7 +3703,7 @@ function normaliseImageQueueRecord(record) {
         birth: info.birth || '',
         death: info.death || '',
         date: info.date || record?.date || '',
-        imgURL: info.imgURL || info.image || '',
+        imgURL: getFirstImageUrl(info) || info.image || '',
         imageCandidates: Array.isArray(record?.imageCandidates) ? record.imageCandidates : [],
         imageCandidateDetails: Array.isArray(record?.imageCandidateDetails) ? record.imageCandidateDetails : [],
         selectedImageCandidateUrl: record?.selectedImageCandidateUrl || '',
@@ -3875,29 +4407,41 @@ function renderImageQueue() {
 }
 
 function addRecordToImageQueue(record, options = {}) {
-    if (options.source === 'batch') {
+    if (options.source === 'batch' || options.source === 'csv') {
         setImageQueueMode('batch');
     }
 
     const normalisedRecord = normaliseImageQueueRecord(record);
     if (!normalisedRecord.id) {
-        alert('This record does not have an id, so it cannot be queued safely.');
-        return;
+        if (!options.suppressAlerts) alert('This record does not have an id, so it cannot be queued safely.');
+        return false;
     }
 
     if (imageQueueRecords.some(item => item.id === normalisedRecord.id)) {
-        alert('This record is already in the image queue.');
-        return;
+        if (!options.suppressAlerts) alert('This record is already in the image queue.');
+        return false;
     }
 
     const queueLimit = getImageQueueLimit();
     if (imageQueueRecords.length >= queueLimit) {
-        alert(`The image queue is limited to ${queueLimit} records in ${getImageQueueModeLabel()}.`);
-        return;
+        if (!options.suppressAlerts) alert(`The image queue is limited to ${queueLimit} records in ${getImageQueueModeLabel()}.`);
+        return false;
     }
 
     imageQueueRecords.push(normalisedRecord);
+    if (!options.suppressRender) renderImageQueue();
+    return true;
+}
+
+function addRecordsToImageQueue(records = [], options = {}) {
+    let added = 0;
+    records.forEach(record => {
+        if (addRecordToImageQueue(record, { ...options, suppressAlerts: true, suppressRender: true })) {
+            added += 1;
+        }
+    });
     renderImageQueue();
+    return added;
 }
 
 function renderImageQueueSearchResults(data) {
@@ -3968,7 +4512,7 @@ async function fillImageQueueWithRandomPeopleWithoutImages() {
             return;
         }
 
-        records.forEach(addRecordToImageQueue);
+        records.forEach(record => addRecordToImageQueue(record));
         renderImageQueue();
     } catch (error) {
         console.error('Error filling image queue randomly:', error);
@@ -5201,7 +5745,9 @@ const csvImportState = {
     fileName: '',
     candidates: [],
     previewed: false,
-    busy: false
+    busy: false,
+    lastCommitRows: [],
+    lastCommitSummary: null
 };
 
 function parseCsvText(text = '') {
@@ -5893,6 +6439,196 @@ function buildCsvImportCommitPayload() {
     });
 }
 
+
+function getCsvImportImageQueueTypes({ people = false, artworkBooks = false } = {}) {
+    const types = new Set();
+    if (people) {
+        types.add('artist');
+        types.add('theorist');
+    }
+    if (artworkBooks) {
+        types.add('artworkBook');
+    }
+    return types;
+}
+
+function getCsvFollowupImageQueueTypes() {
+    return getCsvImportImageQueueTypes({
+        people: Boolean(document.getElementById('csv-import-followup-queue-people')?.checked),
+        artworkBooks: Boolean(document.getElementById('csv-import-followup-queue-artworkbooks')?.checked)
+    });
+}
+
+function getCommittedCsvRowsForFollowup({ includeCreated = true, includeMerged = true } = {}) {
+    const rows = Array.isArray(csvImportState.lastCommitRows) ? csvImportState.lastCommitRows : [];
+    return rows.filter(row => {
+        if (!row?.id || row.status === 'skipped') return false;
+        if (row.status === 'created') return includeCreated;
+        if (row.status === 'merged') return includeMerged;
+        return false;
+    });
+}
+
+function getUniqueCommittedCsvRecordIds(options = {}) {
+    return [...new Set(getCommittedCsvRowsForFollowup(options).map(row => String(row.id || '').trim()).filter(Boolean))];
+}
+
+async function queueCsvImportedMissingImages(commitRows = [], wantedTypes = getCsvFollowupImageQueueTypes()) {
+    if (!wantedTypes || !wantedTypes.size) return 0;
+
+    const candidateByKey = new Map(csvImportState.candidates.map(candidate => [candidate.candidateKey, candidate]));
+    const queueable = [];
+    const seenIds = new Set();
+
+    for (const row of Array.isArray(commitRows) ? commitRows : []) {
+        if (!row?.id || row.status === 'skipped' || seenIds.has(row.id)) continue;
+        seenIds.add(row.id);
+        const candidate = candidateByKey.get(row.candidateKey);
+        const candidateInfo = candidate?.info || {};
+        const candidateType = String(candidateInfo.type || '').trim();
+        if (candidateType && !wantedTypes.has(candidateType)) continue;
+        if (getFirstImageUrl(candidateInfo)) continue;
+
+        try {
+            const response = await fetch(`${baseURL}/api/reference/${encodeURIComponent(row.id)}`);
+            const record = await response.json().catch(() => null);
+            if (!response.ok || !record) continue;
+            const info = record.info || {};
+            if (!wantedTypes.has(String(info.type || '').trim())) continue;
+            if (getFirstImageUrl(info)) continue;
+            queueable.push(record);
+        } catch (error) {
+            console.error('Could not fetch committed CSV record for image queue:', error);
+        }
+    }
+
+    if (!queueable.length) return 0;
+    return addRecordsToImageQueue(queueable, { source: 'csv' });
+}
+
+function setCsvImportFollowupBusy(isBusy) {
+    const applyButton = document.getElementById('csv-import-followup-apply');
+    const doneButton = document.getElementById('csv-import-followup-done');
+    const closeButton = document.getElementById('csv-import-followup-close');
+    [applyButton, doneButton, closeButton].forEach(button => {
+        if (button) button.disabled = Boolean(isBusy);
+    });
+}
+
+function closeCsvImportFollowupModal() {
+    const modal = document.getElementById('csv-import-followup-modal');
+    if (modal) modal.classList.add('hidden');
+}
+
+function openCsvImportFollowupModal(summary = {}) {
+    const modal = document.getElementById('csv-import-followup-modal');
+    const summaryEl = document.getElementById('csv-import-followup-summary');
+    const statusEl = document.getElementById('csv-import-followup-status');
+    const nameInput = document.getElementById('csv-import-followup-curation-name');
+    const createdBox = document.getElementById('csv-import-followup-include-created');
+    const mergedBox = document.getElementById('csv-import-followup-include-merged');
+    const peopleBox = document.getElementById('csv-import-followup-queue-people');
+    const booksBox = document.getElementById('csv-import-followup-queue-artworkbooks');
+
+    if (!modal) return;
+
+    const created = summary?.created || 0;
+    const merged = summary?.merged || 0;
+    const skipped = summary?.skipped || 0;
+    if (summaryEl) {
+        summaryEl.textContent = `Committed: ${created} created, ${merged} merged, ${skipped} skipped.`;
+    }
+    if (statusEl) statusEl.textContent = '';
+    if (nameInput) {
+        nameInput.value = '';
+        if (csvImportState.fileName) {
+            nameInput.placeholder = csvImportState.fileName.replace(/\.csv$/i, '');
+        }
+    }
+    if (createdBox) createdBox.checked = created > 0;
+    if (mergedBox) mergedBox.checked = merged > 0;
+    if (peopleBox) peopleBox.checked = false;
+    if (booksBox) booksBox.checked = false;
+    setCsvImportFollowupBusy(false);
+    modal.classList.remove('hidden');
+    nameInput?.focus();
+}
+
+async function createCurationFromCsvImport(recordIds = [], curationName = '') {
+    const name = String(curationName || '').trim();
+    if (!name) return null;
+    if (!recordIds.length) {
+        throw new Error('No committed records are available for this curation.');
+    }
+
+    const summary = csvImportState.lastCommitSummary || {};
+    const response = await fetch(`${baseURL}/api/curations/from-records`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name,
+            description: `Created from CSV import${csvImportState.fileName ? `: ${csvImportState.fileName}` : ''}. ${summary.created || 0} created, ${summary.merged || 0} merged, ${summary.skipped || 0} skipped.`,
+            recordIds,
+            source: 'csv-import'
+        })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(data.message || data.error || 'Could not create saved curation.');
+    }
+    return data;
+}
+
+async function applyCsvImportFollowup() {
+    const statusEl = document.getElementById('csv-import-followup-status');
+    const curationName = document.getElementById('csv-import-followup-curation-name')?.value || '';
+    const includeCreated = Boolean(document.getElementById('csv-import-followup-include-created')?.checked);
+    const includeMerged = Boolean(document.getElementById('csv-import-followup-include-merged')?.checked);
+    const wantedTypes = getCsvFollowupImageQueueTypes();
+    const committedRows = getCommittedCsvRowsForFollowup({ includeCreated, includeMerged });
+    const recordIds = getUniqueCommittedCsvRecordIds({ includeCreated, includeMerged });
+    const wantsCuration = String(curationName || '').trim() !== '';
+    const wantsQueue = wantedTypes.size > 0;
+
+    if (!wantsCuration && !wantsQueue) {
+        closeCsvImportFollowupModal();
+        return;
+    }
+
+    if (!includeCreated && !includeMerged) {
+        alert('Choose created and/or merged records for the follow-up.');
+        return;
+    }
+
+    setCsvImportFollowupBusy(true);
+    if (statusEl) statusEl.textContent = 'Applying follow-up…';
+
+    try {
+        const messages = [];
+        if (wantsCuration) {
+            const curationResult = await createCurationFromCsvImport(recordIds, curationName);
+            messages.push(`Created saved diagram “${curationResult.name || curationName}” with ${curationResult.includedCount || recordIds.length} record${(curationResult.includedCount || recordIds.length) === 1 ? '' : 's'}.`);
+        }
+
+        if (wantsQueue) {
+            const queued = await queueCsvImportedMissingImages(committedRows, wantedTypes);
+            messages.push(queued
+                ? `Sent ${queued} missing-image record${queued === 1 ? '' : 's'} to Image Queue.`
+                : 'No matching missing-image records were sent to Image Queue.');
+        }
+
+        if (statusEl) statusEl.textContent = messages.join(' ');
+        const commitStatus = document.getElementById('csv-import-commit-status');
+        if (commitStatus) commitStatus.textContent = messages.join(' ');
+    } catch (error) {
+        console.error('CSV import follow-up failed:', error);
+        if (statusEl) statusEl.textContent = `Follow-up failed: ${error.message}`;
+        alert(`CSV import follow-up failed: ${error.message}`);
+    } finally {
+        setCsvImportFollowupBusy(false);
+    }
+}
+
 async function commitCsvImport() {
     if (csvImportState.busy) return;
 
@@ -5925,19 +6661,19 @@ async function commitCsvImport() {
         if (!response.ok) throw new Error(data.error || data.message || 'CSV import commit failed.');
 
         const status = document.getElementById('csv-import-commit-status');
-        if (status) {
-            status.textContent = `Committed: ${data.summary?.created || 0} created, ${data.summary?.merged || 0} merged, ${data.summary?.skipped || 0} skipped.`;
-        }
+        csvImportState.lastCommitRows = data.rows || [];
+        csvImportState.lastCommitSummary = data.summary || {};
+
+        const completeText = `Committed: ${data.summary?.created || 0} created, ${data.summary?.merged || 0} merged, ${data.summary?.skipped || 0} skipped. Choose optional follow-up.`;
+        if (status) status.textContent = completeText;
 
         csvImportState.previewed = false;
-        csvImportState.candidates = [];
-        const container = document.getElementById('csv-import-candidates');
         const summary = document.getElementById('csv-import-summary');
-        if (container) container.innerHTML = '';
         if (summary) {
             summary.classList.add('csv-import-summary');
-            summary.textContent = `Import complete: ${data.summary?.created || 0} created, ${data.summary?.merged || 0} merged, ${data.summary?.skipped || 0} skipped.`;
+            summary.textContent = completeText;
         }
+        openCsvImportFollowupModal(data.summary || {});
     } catch (error) {
         console.error('CSV import commit failed:', error);
         alert(`CSV import commit failed: ${error.message}`);
@@ -5952,6 +6688,8 @@ function clearCsvImport() {
     csvImportState.candidates = [];
     csvImportState.previewed = false;
     csvImportState.busy = false;
+    csvImportState.lastCommitRows = [];
+    csvImportState.lastCommitSummary = null;
     const fileInput = document.getElementById('csv-import-file');
     const container = document.getElementById('csv-import-candidates');
     const summary = document.getElementById('csv-import-summary');
@@ -5970,9 +6708,15 @@ function initialiseCsvImportReview() {
     const previewButton = document.getElementById('csv-import-preview');
     const clearButton = document.getElementById('csv-import-clear');
     const commitButton = document.getElementById('csv-import-commit');
+    const followupApplyButton = document.getElementById('csv-import-followup-apply');
+    const followupDoneButton = document.getElementById('csv-import-followup-done');
+    const followupCloseButton = document.getElementById('csv-import-followup-close');
     if (previewButton) previewButton.addEventListener('click', previewCsvImport);
     if (clearButton) clearButton.addEventListener('click', clearCsvImport);
     if (commitButton) commitButton.addEventListener('click', commitCsvImport);
+    if (followupApplyButton) followupApplyButton.addEventListener('click', applyCsvImportFollowup);
+    if (followupDoneButton) followupDoneButton.addEventListener('click', closeCsvImportFollowupModal);
+    if (followupCloseButton) followupCloseButton.addEventListener('click', closeCsvImportFollowupModal);
     updateCsvImportCommitAvailability();
 }
 
