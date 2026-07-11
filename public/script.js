@@ -90,8 +90,12 @@ function formatValueForEditor(value) {
 }
 
 function parseRootArrayField(value) {
+    if (Array.isArray(value)) {
+        return value.map(item => String(item || '').trim()).filter(Boolean);
+    }
+
     return String(value || '')
-        .split(',')
+        .split(/[\n,]/)
         .map(item => item.trim())
         .filter(Boolean);
 }
@@ -185,6 +189,143 @@ function formatSearchResultLabel(item = {}) {
     }
 
     return formattedLabel;
+}
+
+
+function normaliseRelationshipInputValue(value = '') {
+    return [...new Set(String(value || '')
+        .split(/[\n,]/)
+        .map(item => item.trim())
+        .filter(Boolean))];
+}
+
+function setRelationshipInputIds(input, ids = []) {
+    if (!input) return;
+    const normalised = normaliseRelationshipInputValue(ids.join(','));
+    input.value = input.tagName === 'TEXTAREA' ? normalised.join('\n') : normalised.join(', ');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function appendRelationshipInputId(input, id = '') {
+    const cleanId = String(id || '').trim();
+    if (!input || !cleanId) return;
+    const ids = normaliseRelationshipInputValue(input.value);
+    if (!ids.includes(cleanId)) ids.push(cleanId);
+    setRelationshipInputIds(input, ids);
+}
+
+function createRelationshipLookupControls(input, role = 'parent', options = {}) {
+    const wrapper = document.createElement('div');
+    wrapper.classList.add('relationship-lookup-controls');
+    if (options.compact) wrapper.classList.add('relationship-lookup-controls-compact');
+
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.classList.add('relationship-lookup-query');
+    searchInput.placeholder = `Find ${role} by label...`;
+
+    const searchButton = document.createElement('button');
+    searchButton.type = 'button';
+    searchButton.textContent = `Find ${role}`;
+
+    const results = document.createElement('select');
+    results.classList.add('relationship-lookup-results');
+    results.disabled = true;
+
+    const addButton = document.createElement('button');
+    addButton.type = 'button';
+    addButton.textContent = `Add ${role} ID`;
+    addButton.disabled = true;
+
+    const status = document.createElement('span');
+    status.classList.add('relationship-lookup-status');
+
+    async function runSearch() {
+        const query = searchInput.value.trim();
+        results.innerHTML = '';
+        results.disabled = true;
+        addButton.disabled = true;
+
+        if (!query) {
+            status.textContent = 'Enter a label to search.';
+            return;
+        }
+
+        status.textContent = 'Searching...';
+        try {
+            const response = await fetch(`${baseURL}/api/reference/label/all/${encodeURIComponent(query)}`);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || data.message || 'Search failed.');
+
+            const matches = Array.isArray(data) ? data : [];
+            if (!matches.length) {
+                status.textContent = 'No matches.';
+                return;
+            }
+
+            matches.slice(0, 25).forEach(item => {
+                const fields = getSearchResultFields(item);
+                if (!fields.id) return;
+                const option = document.createElement('option');
+                option.value = fields.id;
+                option.textContent = `${fields.label || '(untitled)'}${fields.labelJp ? ` / ${fields.labelJp}` : ''}${fields.type ? ` [${fields.type}]` : ''} — ${fields.id}`;
+                results.appendChild(option);
+            });
+
+            results.disabled = results.options.length === 0;
+            addButton.disabled = results.options.length === 0;
+            status.textContent = `${results.options.length} match${results.options.length === 1 ? '' : 'es'}.`;
+        } catch (error) {
+            console.error('Relationship lookup failed:', error);
+            status.textContent = `Search failed: ${error.message}`;
+        }
+    }
+
+    searchButton.addEventListener('click', runSearch);
+    searchInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            runSearch();
+        }
+    });
+
+    addButton.addEventListener('click', () => {
+        const id = results.value;
+        appendRelationshipInputId(input, id);
+        status.textContent = id ? `Added ${id}.` : 'Choose a result first.';
+        if (typeof options.onAppend === 'function') options.onAppend(id);
+    });
+
+    wrapper.appendChild(searchInput);
+    wrapper.appendChild(searchButton);
+    wrapper.appendChild(results);
+    wrapper.appendChild(addButton);
+    wrapper.appendChild(status);
+    return wrapper;
+}
+
+function summariseRelationshipArrayChange(before = [], after = [], label = 'relationship') {
+    const beforeSet = new Set(before);
+    const afterSet = new Set(after);
+    const added = [...afterSet].filter(id => !beforeSet.has(id));
+    const removed = [...beforeSet].filter(id => !afterSet.has(id));
+    if (!added.length && !removed.length) return '';
+    return `${label}: ${added.length} added, ${removed.length} removed`;
+}
+
+function shouldSyncRelationshipChanges(beforeParentIds = [], afterParentIds = [], beforeChildIds = [], afterChildIds = [], contextLabel = 'this record') {
+    const parentSummary = summariseRelationshipArrayChange(beforeParentIds, afterParentIds, 'parents');
+    const childSummary = summariseRelationshipArrayChange(beforeChildIds, afterChildIds, 'children');
+    const lines = [parentSummary, childSummary].filter(Boolean);
+    if (!lines.length) return false;
+
+    return window.confirm(
+        `Relationship changes detected for ${contextLabel}:\n\n` +
+        `${lines.join('\n')}\n\n` +
+        'Also update the reciprocal links on the related records?\n\n' +
+        'OK = update both sides.\nCancel = save only this record.'
+    );
 }
 
 function appendFormField(container, key, value) {
@@ -382,6 +523,7 @@ function appendEditableRelationshipRow(container, labelText, fieldName, values =
 
     row.appendChild(label);
     row.appendChild(input);
+    row.appendChild(createRelationshipLookupControls(input, fieldName === 'children' ? 'child' : 'parent'));
     container.appendChild(row);
 
     return input;
@@ -397,7 +539,7 @@ function renderEditRecordMetadata(container, record = {}) {
 
     const help = document.createElement('p');
     help.classList.add('draft-source-help-text');
-    help.textContent = 'Record ID and added date are read-only. Parent and child IDs can be edited directly; this changes only the current record and does not create reciprocal links automatically.';
+    help.textContent = 'Record ID and added date are read-only. Parent and child IDs can be edited directly or found by label below. When relationships change, saving asks whether to update the reciprocal links on the related records.';
     panel.appendChild(help);
 
     appendReadOnlyRecordMetaRow(panel, 'Record ID', record.id || '');
@@ -1700,6 +1842,7 @@ async function loadDraftRecordIntoAddForm(draftRecord) {
 async function renderResults(data, resultElementId, multiple = false) {
     const container = document.getElementById(resultElementId);
     container.innerHTML = ''; // Clear previous results
+    clearSingleDeleteImpactPreview();
 
     if (Array.isArray(data) && data.length > 0) {
         const selectElement = document.createElement('div'); // Using a div to simulate the select element
@@ -2256,6 +2399,16 @@ async function handleEditRecord(data) {
             updatedInfo[key] = parseEditedInfoValue(value, originalInfo[key]);
         });
 
+        const nextParentIds = parseRootArrayField(relationshipEditors.parentIdInput.value);
+        const nextChildIds = parseRootArrayField(relationshipEditors.childrenInput.value);
+        const syncRelationships = shouldSyncRelationshipChanges(
+            parseRootArrayField(fullRecord.parentId || []),
+            nextParentIds,
+            parseRootArrayField(fullRecord.children || []),
+            nextChildIds,
+            updatedInfo.label || fullRecord.info?.label || recordId
+        );
+
         const response = await fetch(`${window.location.protocol}//${window.location.host}/api/reference/update/${recordId}`, {
             method: 'PUT',
             headers: {
@@ -2263,8 +2416,9 @@ async function handleEditRecord(data) {
             },
             body: JSON.stringify({
                 info: updatedInfo,
-                parentId: parseRootArrayField(relationshipEditors.parentIdInput.value),
-                children: parseRootArrayField(relationshipEditors.childrenInput.value)
+                parentId: nextParentIds,
+                children: nextChildIds,
+                syncRelationships
             })
         });
 
@@ -2461,6 +2615,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             );
             if (!shouldContinue) return;
         }
+
+        const syncRelationships = (newRecord.parentId.length || newRecord.children.length)
+            ? window.confirm(
+                `This new record has ${newRecord.parentId.length} parent ID${newRecord.parentId.length === 1 ? '' : 's'} and ${newRecord.children.length} child ID${newRecord.children.length === 1 ? '' : 's'}.\n\n` +
+                'Also update the reciprocal links on those existing records?\n\n' +
+                'OK = update both sides.\nCancel = save only this new record.'
+            )
+            : false;
+
+        newRecord.syncRelationships = syncRelationships;
     
         try {
             const response = await fetch(`${baseURL}/api/reference/new`, {
@@ -2513,6 +2677,7 @@ function generateForm(template) {
         input.value = template.parentId.join(', ');
         formFields.appendChild(label);
         formFields.appendChild(input);
+        formFields.appendChild(createRelationshipLookupControls(input, 'parent'));
         formFields.appendChild(document.createElement('br'));
     }
 
@@ -2525,6 +2690,7 @@ function generateForm(template) {
         input.value = template.children.join(', ');
         formFields.appendChild(label);
         formFields.appendChild(input);
+        formFields.appendChild(createRelationshipLookupControls(input, 'child'));
         formFields.appendChild(document.createElement('br'));
     }
 
@@ -2589,6 +2755,82 @@ function renderDeletableResults(data, resultElementId) {
     }
 }
 
+function clearSingleDeleteImpactPreview() {
+    const preview = document.getElementById('delete-impact-preview');
+    if (preview) preview.innerHTML = '';
+}
+
+function renderSingleDeleteImpactPreview(data, ids) {
+    const preview = document.getElementById('delete-impact-preview');
+    if (!preview) return;
+    preview.innerHTML = '';
+
+    const summary = document.createElement('div');
+    summary.classList.add('delete-impact-summary');
+    summary.innerHTML = `
+        <h3>Delete impact preview</h3>
+        <p>${data.summary?.foundCount || 0} record${(data.summary?.foundCount || 0) === 1 ? '' : 's'} found.</p>
+        <p>${data.summary?.relationshipReferenceCount || 0} other record${(data.summary?.relationshipReferenceCount || 0) === 1 ? '' : 's'} reference the selected ID${ids.length === 1 ? '' : 's'}.</p>
+        <p>${data.summary?.affectedCurationCount || 0} saved curation${(data.summary?.affectedCurationCount || 0) === 1 ? '' : 's'} contain the selected ID${ids.length === 1 ? '' : 's'} or related connections.</p>
+    `;
+    preview.appendChild(summary);
+
+    if (Array.isArray(data.records) && data.records.length) {
+        const list = document.createElement('ul');
+        list.classList.add('delete-impact-record-list');
+        data.records.forEach(record => {
+            const item = document.createElement('li');
+            item.textContent = `${record.label || record.id} [${record.type || 'unknown'}] — ${record.id}`;
+            list.appendChild(item);
+        });
+        preview.appendChild(list);
+    }
+
+    const cleanupRelationshipsLabel = document.createElement('label');
+    cleanupRelationshipsLabel.classList.add('batch-checkbox-label');
+    cleanupRelationshipsLabel.innerHTML = '<input type="checkbox" id="single-delete-cleanup-relationships" checked> clean parent/child references from other records';
+
+    const cleanupCurationsLabel = document.createElement('label');
+    cleanupCurationsLabel.classList.add('batch-checkbox-label');
+    cleanupCurationsLabel.innerHTML = '<input type="checkbox" id="single-delete-cleanup-curations" checked> remove deleted nodes/connections from saved curations';
+
+    const commitButton = document.createElement('button');
+    commitButton.type = 'button';
+    commitButton.classList.add('batch-danger-action');
+    commitButton.textContent = 'Commit Reviewed Delete';
+    commitButton.addEventListener('click', () => commitSingleReviewedDelete(ids));
+
+    preview.appendChild(cleanupRelationshipsLabel);
+    preview.appendChild(cleanupCurationsLabel);
+    preview.appendChild(commitButton);
+}
+
+async function commitSingleReviewedDelete(ids) {
+    if (!ids.length) return;
+    const cleanupRelationships = document.getElementById('single-delete-cleanup-relationships')?.checked !== false;
+    const cleanupCurations = document.getElementById('single-delete-cleanup-curations')?.checked !== false;
+    const confirmation = confirm(`Delete ${ids.length} selected record${ids.length === 1 ? '' : 's'}?\n\nThis will remove canonical database records. It cannot be undone from this screen.`);
+    if (!confirmation) return;
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/delete-reviewed`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids, cleanupRelationships, cleanupCurations })
+        });
+
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || result.message || 'Reviewed delete failed.');
+        alert(result.message || 'Records deleted successfully.');
+        document.getElementById('result-delete').innerHTML = '';
+        document.getElementById('delete-selected-records').style.display = 'none';
+        clearSingleDeleteImpactPreview();
+    } catch (error) {
+        console.error('Error deleting records:', error);
+        alert(`Failed to delete records: ${error.message}`);
+    }
+}
+
 document.getElementById('delete-selected-records').addEventListener('click', async () => {
     const selectedCheckboxes = document.querySelectorAll('#result-delete input[type="checkbox"]:checked');
     const selectedIds = Array.from(selectedCheckboxes).map(cb => cb.value);
@@ -2598,27 +2840,19 @@ document.getElementById('delete-selected-records').addEventListener('click', asy
         return;
     }
 
-    const confirmation = confirm('Do you really want to delete the selected record(s)?');
-    if (!confirmation) return;
-
     try {
-        const response = await fetch(`${baseURL}/api/reference/delete-duplicates`, {
-            method: 'DELETE',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+        const response = await fetch(`${baseURL}/api/reference/delete-impact`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ids: selectedIds })
         });
 
         const result = await response.json();
-        alert(result.message || 'Records deleted successfully.');
-
-        // Clear the results and hide the delete button
-        document.getElementById('result-delete').innerHTML = '';
-        document.getElementById('delete-selected-records').style.display = 'none';
+        if (!response.ok) throw new Error(result.error || result.message || 'Delete impact preview failed.');
+        renderSingleDeleteImpactPreview(result, selectedIds);
     } catch (error) {
-        console.error('Error deleting records:', error);
-        alert('Failed to delete records.');
+        console.error('Error previewing delete impact:', error);
+        alert(`Failed to preview delete impact: ${error.message}`);
     }
 });
 
@@ -4586,7 +4820,8 @@ const batchRecordsState = {
     pendingEdits: new Map(),
     resolvedParent: null,
     previewRows: [],
-    fieldPreviewRows: []
+    fieldPreviewRows: [],
+    deleteImpact: null
 };
 
 const BATCH_APPLY_INFO_FIELDS = new Set([
@@ -4738,6 +4973,8 @@ function updateBatchSelectionControls() {
     const fieldPreviewButton = document.getElementById('batch-preview-field-apply');
     const fieldCommitButton = document.getElementById('batch-commit-field-apply');
     const sendImageQueueButton = document.getElementById('batch-send-selected-image-queue');
+    const deletePreviewButton = document.getElementById('batch-preview-delete');
+    const deleteCommitButton = document.getElementById('batch-commit-delete');
 
     if (count) {
         count.textContent = totalCount
@@ -4763,6 +5000,9 @@ function updateBatchSelectionControls() {
             ? `Send Missing Images to Queue (${missingImageSelectedCount})`
             : 'Send Missing Images to Queue';
     }
+    if (deletePreviewButton) deletePreviewButton.disabled = selectedCount === 0;
+    if (deleteCommitButton) deleteCommitButton.disabled = !batchRecordsState.deleteImpact?.records?.length;
+
     if (previewButton) previewButton.disabled = selectedCount === 0 || !batchRecordsState.resolvedParent;
     if (commitButton) {
         const changedRows = batchRecordsState.previewRows.filter(row => row && !row.alreadyPresent && !row.isSelfRelationship);
@@ -4780,6 +5020,14 @@ function clearBatchOperationPreview() {
 function clearBatchFieldApplyPreview() {
     batchRecordsState.fieldPreviewRows = [];
     const preview = document.getElementById('batch-field-apply-preview');
+    if (preview) preview.innerHTML = '';
+    updateBatchSelectionControls();
+}
+
+
+function clearBatchDeletePreview() {
+    batchRecordsState.deleteImpact = null;
+    const preview = document.getElementById('batch-delete-preview');
     if (preview) preview.innerHTML = '';
     updateBatchSelectionControls();
 }
@@ -4837,6 +5085,7 @@ function resetBatchRootSelection() {
     batchRecordsState.resolvedParent = null;
     clearBatchOperationPreview();
     clearBatchFieldApplyPreview();
+    clearBatchDeletePreview();
     renderBatchSelectedRoot();
     renderBatchRecordsList();
     renderResolvedBatchParent(null);
@@ -4845,12 +5094,14 @@ function resetBatchRootSelection() {
 function renderBatchSelectedRoot() {
     const rootPanel = document.getElementById('batch-selected-root');
     const loadButton = document.getElementById('batch-load-cluster-button');
+    const rebuildButton = document.getElementById('batch-rebuild-curation-connections');
 
     if (!rootPanel) return;
 
     if (!batchRecordsState.selectedRoot) {
         rootPanel.textContent = 'No source selected.';
         if (loadButton) loadButton.disabled = true;
+        if (rebuildButton) rebuildButton.disabled = true;
         return;
     }
 
@@ -4866,6 +5117,7 @@ function renderBatchSelectedRoot() {
 
     rootPanel.innerHTML = `<strong>${label}</strong>${jp ? ` <span class="result-label-jp">${escapeHTML(jp)}</span>` : ''}<br><span>${escapeHTML(sourceLabel)} · ${escapeHTML(type || 'unknown type')} · ID: ${escapeHTML(id)}${countText}</span>`;
     if (loadButton) loadButton.disabled = !id;
+    if (rebuildButton) rebuildButton.disabled = !(id && root.source === BATCH_CURATION_SOURCE);
 }
 
 function renderBatchRootResults(data = []) {
@@ -4900,6 +5152,7 @@ function renderBatchRootResults(data = []) {
             batchRecordsState.expandedIds.clear();
             batchRecordsState.pendingEdits.clear();
             clearBatchFieldApplyPreview();
+            clearBatchDeletePreview();
             document.querySelectorAll('.batch-root-result-button').forEach(result => result.classList.remove('is-selected'));
             button.classList.add('is-selected');
             renderBatchSelectedRoot();
@@ -5073,8 +5326,19 @@ function renderBatchRecordEditor(record, row) {
     editor.appendChild(createBatchEditField(imageKey, createBatchTextInput(`info.${imageKey}`, info[imageKey] || '')));
     editor.appendChild(createBatchEditField('note', createBatchTextarea('info.note', info.note || '', 4)));
     editor.appendChild(createBatchEditField('note_jp', createBatchTextarea('info.note_jp', info.note_jp || '', 4)));
-    editor.appendChild(createBatchEditField('parentId', createBatchTextarea('parentId', getBatchDraftParentIds(record).join('\n'), 3)));
-    editor.appendChild(createBatchEditField('children', createBatchTextarea('children', getBatchDraftChildIds(record).join('\n'), 3)));
+
+    const parentField = createBatchTextarea('parentId', getBatchDraftParentIds(record).join('\n'), 3);
+    const childField = createBatchTextarea('children', getBatchDraftChildIds(record).join('\n'), 3);
+    editor.appendChild(createBatchEditField('parentId', parentField));
+    editor.appendChild(createRelationshipLookupControls(parentField, 'parent', {
+        compact: true,
+        onAppend: () => markBatchRecordRowDirty(id, row)
+    }));
+    editor.appendChild(createBatchEditField('children', childField));
+    editor.appendChild(createRelationshipLookupControls(childField, 'child', {
+        compact: true,
+        onAppend: () => markBatchRecordRowDirty(id, row)
+    }));
 
     editor.querySelectorAll('input, textarea').forEach(field => {
         field.addEventListener('input', () => markBatchRecordRowDirty(id, row));
@@ -5137,6 +5401,7 @@ function renderBatchRecordsList() {
             updateBatchSelectionControls();
             clearBatchOperationPreview();
             clearBatchFieldApplyPreview();
+            clearBatchDeletePreview();
         });
 
         const title = document.createElement('div');
@@ -5225,6 +5490,14 @@ async function saveBatchRecordRow(id, row) {
     const saveButton = row.querySelector('.batch-record-editor-actions button');
     const status = row.querySelector('.batch-record-save-status');
     const payload = collectBatchRecordRowPayload(row);
+    const record = batchRecordsState.records.find(item => getBatchRecordId(item) === id) || {};
+    payload.syncRelationships = shouldSyncRelationshipChanges(
+        getBatchRecordParentIds(record),
+        payload.parentId,
+        getBatchRecordChildIds(record),
+        payload.children,
+        getBatchRecordLabel(record) || id
+    );
 
     if (saveButton) saveButton.disabled = true;
     if (status) status.textContent = 'Saving...';
@@ -5258,12 +5531,27 @@ async function saveDirtyBatchRecords() {
 This writes each dirty row to the canonical reference database.`);
     if (!confirmed) return;
 
+    const relationshipEditedEntries = entries.filter(([id, payload]) => {
+        const record = batchRecordsState.records.find(item => getBatchRecordId(item) === id) || {};
+        return summariseRelationshipArrayChange(getBatchRecordParentIds(record), payload.parentId, 'parents') ||
+            summariseRelationshipArrayChange(getBatchRecordChildIds(record), payload.children, 'children');
+    });
+
+    const syncRelationships = relationshipEditedEntries.length
+        ? window.confirm(
+            `${relationshipEditedEntries.length} edited row${relationshipEditedEntries.length === 1 ? '' : 's'} include parent/child changes.\n\n` +
+            'Also update reciprocal links on related records while saving those rows?\n\n' +
+            'OK = update both sides.\nCancel = save only the edited rows.'
+        )
+        : false;
+
     const saveDirtyButton = document.getElementById('batch-save-dirty-records');
     if (saveDirtyButton) saveDirtyButton.disabled = true;
     setBatchClusterStatus(`Saving ${entries.length} edited row${entries.length === 1 ? '' : 's'}...`);
 
     const failures = [];
     for (const [id, payload] of entries) {
+        payload.syncRelationships = syncRelationships;
         try {
             const data = await putBatchRecordPayload(id, payload);
             if (data.record) replaceBatchRecordInState(data.record);
@@ -5293,6 +5581,8 @@ function selectAllBatchRecords() {
     });
     renderBatchRecordsList();
     clearBatchOperationPreview();
+    clearBatchFieldApplyPreview();
+    clearBatchDeletePreview();
 }
 
 function clearBatchRecordSelection() {
@@ -5300,6 +5590,7 @@ function clearBatchRecordSelection() {
     renderBatchRecordsList();
     clearBatchOperationPreview();
     clearBatchFieldApplyPreview();
+    clearBatchDeletePreview();
 }
 
 function expandAllBatchRecords() {
@@ -5645,6 +5936,183 @@ function sendSelectedBatchRecordsToImageQueue() {
 }
 
 
+
+async function rebuildSelectedBatchCurationConnections() {
+    const root = batchRecordsState.selectedRoot;
+    const curationId = root?.curationId || root?.id;
+    const status = document.getElementById('batch-curation-repair-status');
+    const button = document.getElementById('batch-rebuild-curation-connections');
+
+    if (!curationId || root?.source !== BATCH_CURATION_SOURCE) {
+        alert('Choose a saved curation first.');
+        return;
+    }
+
+    if (status) status.textContent = 'Rebuilding saved curation connections from reference relationships...';
+    if (button) button.disabled = true;
+
+    try {
+        const response = await fetch(`${baseURL}/api/curations/${encodeURIComponent(curationId)}/rebuild-connections`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || 'Curation repair failed.');
+        if (status) status.textContent = data.message || `Rebuilt ${data.curationConnectionCount || 0} connections.`;
+        setBatchClusterStatus(data.message || 'Saved curation connections rebuilt. Reload records if needed.');
+    } catch (error) {
+        console.error('Error rebuilding saved curation connections:', error);
+        if (status) status.textContent = `Repair failed: ${error.message}`;
+        alert(`Curation repair failed: ${error.message}`);
+    } finally {
+        renderBatchSelectedRoot();
+    }
+}
+
+function renderBatchDeleteImpact(data = {}) {
+    const preview = document.getElementById('batch-delete-preview');
+    if (!preview) return;
+
+    const records = Array.isArray(data.records) ? data.records : [];
+    const relationships = Array.isArray(data.relationshipReferences) ? data.relationshipReferences : [];
+    const curations = Array.isArray(data.curations) ? data.curations : [];
+
+    preview.innerHTML = '';
+
+    const summary = document.createElement('div');
+    summary.classList.add('batch-preview-summary', 'batch-delete-summary');
+    summary.innerHTML = `<strong>Delete impact:</strong> ${records.length} record${records.length === 1 ? '' : 's'} found for deletion. ${relationships.length} other record${relationships.length === 1 ? '' : 's'} reference them. ${curations.length} saved curation${curations.length === 1 ? '' : 's'} include them or their connections.`;
+    preview.appendChild(summary);
+
+    const recordList = document.createElement('div');
+    recordList.classList.add('batch-delete-impact-section');
+    recordList.innerHTML = '<strong>Records to delete</strong>';
+    records.forEach(record => {
+        const item = document.createElement('div');
+        item.classList.add('batch-preview-row');
+        item.innerHTML = `<div><strong>${escapeHTML(record.label || record.id)}</strong>${record.label_jp ? ` <span class="result-label-jp">${escapeHTML(record.label_jp)}</span>` : ''}<br><code>${escapeHTML(record.id)}</code></div><div>${escapeHTML(record.type || 'unknown type')}</div>`;
+        recordList.appendChild(item);
+    });
+    preview.appendChild(recordList);
+
+    if (relationships.length) {
+        const relationList = document.createElement('div');
+        relationList.classList.add('batch-delete-impact-section');
+        relationList.innerHTML = '<strong>Relationship references to clean</strong>';
+        relationships.slice(0, 30).forEach(record => {
+            const item = document.createElement('div');
+            item.classList.add('batch-preview-row');
+            const hits = [
+                ...(Array.isArray(record.parentHits) ? record.parentHits.map(id => `parentId:${id}`) : []),
+                ...(Array.isArray(record.childHits) ? record.childHits.map(id => `children:${id}`) : [])
+            ];
+            item.innerHTML = `<div><strong>${escapeHTML(record.label || record.id)}</strong><br><code>${escapeHTML(record.id)}</code></div><div>${hits.map(escapeHTML).join('<br>')}</div>`;
+            relationList.appendChild(item);
+        });
+        if (relationships.length > 30) {
+            const more = document.createElement('p');
+            more.textContent = `… plus ${relationships.length - 30} more referencing records.`;
+            relationList.appendChild(more);
+        }
+        preview.appendChild(relationList);
+    }
+
+    if (curations.length) {
+        const curationList = document.createElement('div');
+        curationList.classList.add('batch-delete-impact-section');
+        curationList.innerHTML = '<strong>Saved curations to clean, not delete</strong>';
+        curations.forEach(curation => {
+            const item = document.createElement('div');
+            item.classList.add('batch-preview-row');
+            item.innerHTML = `<div><strong>${escapeHTML(curation.name || curation.curationId)}</strong><br><code>${escapeHTML(curation.curationId || '')}</code></div><div>${Number(curation.includedNodeHits || 0)} node hit${Number(curation.includedNodeHits || 0) === 1 ? '' : 's'}<br>${Number(curation.connectionHits || 0)} connection hit${Number(curation.connectionHits || 0) === 1 ? '' : 's'}</div>`;
+            curationList.appendChild(item);
+        });
+        preview.appendChild(curationList);
+    }
+
+    if (Array.isArray(data.missingIds) && data.missingIds.length) {
+        const missing = document.createElement('p');
+        missing.classList.add('batch-delete-warning');
+        missing.textContent = `Missing IDs ignored: ${data.missingIds.join(', ')}`;
+        preview.appendChild(missing);
+    }
+}
+
+async function previewBatchDeleteImpact() {
+    const ids = [...batchRecordsState.selectedIds].filter(Boolean);
+    if (!ids.length) {
+        alert('Select at least one record first.');
+        return;
+    }
+
+    const button = document.getElementById('batch-preview-delete');
+    if (button) button.disabled = true;
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/delete-impact`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || 'Delete impact preview failed.');
+        batchRecordsState.deleteImpact = data;
+        renderBatchDeleteImpact(data);
+    } catch (error) {
+        console.error('Error previewing delete impact:', error);
+        alert(`Delete preview failed: ${error.message}`);
+        clearBatchDeletePreview();
+    } finally {
+        updateBatchSelectionControls();
+    }
+}
+
+async function commitBatchReviewedDelete() {
+    const impact = batchRecordsState.deleteImpact;
+    const ids = Array.isArray(impact?.records) ? impact.records.map(record => record.id).filter(Boolean) : [];
+    if (!ids.length) {
+        alert('Preview delete impact first.');
+        return;
+    }
+
+    const cleanupRelationships = document.getElementById('batch-delete-cleanup-relationships')?.checked !== false;
+    const cleanupCurations = document.getElementById('batch-delete-cleanup-curations')?.checked !== false;
+    const names = impact.records.map(record => record.label || record.id).slice(0, 8).join(', ');
+    const confirmed = window.confirm(`Delete ${ids.length} record${ids.length === 1 ? '' : 's'} from the reference database?\n\n${names}${ids.length > 8 ? '…' : ''}\n\nThis cannot be undone from this screen.`);
+    if (!confirmed) return;
+
+    const button = document.getElementById('batch-commit-delete');
+    if (button) button.disabled = true;
+
+    try {
+        const response = await fetch(`${baseURL}/api/reference/delete-reviewed`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids, cleanupRelationships, cleanupCurations })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || 'Reviewed delete failed.');
+
+        const deletedSet = new Set(ids);
+        batchRecordsState.records = batchRecordsState.records.filter(record => !deletedSet.has(getBatchRecordId(record)));
+        deletedSet.forEach(id => {
+            batchRecordsState.selectedIds.delete(id);
+            batchRecordsState.expandedIds.delete(id);
+            batchRecordsState.pendingEdits.delete(id);
+        });
+        clearBatchOperationPreview();
+        clearBatchFieldApplyPreview();
+        clearBatchDeletePreview();
+        renderBatchRecordsList();
+        setBatchClusterStatus(data.message || `Deleted ${data.deletedCount || ids.length} records.`);
+        alert(data.message || 'Reviewed delete complete.');
+    } catch (error) {
+        console.error('Error committing reviewed delete:', error);
+        alert(`Reviewed delete failed: ${error.message}`);
+    } finally {
+        updateBatchSelectionControls();
+    }
+}
+
 function initialiseBatchRecordsWorkbench() {
     const searchButton = document.getElementById('batch-root-search-button');
     const searchInput = document.getElementById('batch-root-query');
@@ -5660,6 +6128,11 @@ function initialiseBatchRecordsWorkbench() {
     const fieldPreviewButton = document.getElementById('batch-preview-field-apply');
     const fieldCommitButton = document.getElementById('batch-commit-field-apply');
     const sendImageQueueButton = document.getElementById('batch-send-selected-image-queue');
+    const rebuildCurationButton = document.getElementById('batch-rebuild-curation-connections');
+    const deletePreviewButton = document.getElementById('batch-preview-delete');
+    const deleteCommitButton = document.getElementById('batch-commit-delete');
+    const deleteCleanupRelationships = document.getElementById('batch-delete-cleanup-relationships');
+    const deleteCleanupCurations = document.getElementById('batch-delete-cleanup-curations');
     const operationSelect = document.getElementById('batch-operation-select');
     const resolveParentButton = document.getElementById('batch-resolve-parent-button');
     const parentInput = document.getElementById('batch-parent-input');
@@ -5692,6 +6165,11 @@ function initialiseBatchRecordsWorkbench() {
     if (collapseAllButton) collapseAllButton.addEventListener('click', collapseAllBatchRecords);
     if (saveDirtyButton) saveDirtyButton.addEventListener('click', saveDirtyBatchRecords);
     if (sendImageQueueButton) sendImageQueueButton.addEventListener('click', sendSelectedBatchRecordsToImageQueue);
+    if (rebuildCurationButton) rebuildCurationButton.addEventListener('click', rebuildSelectedBatchCurationConnections);
+    if (deletePreviewButton) deletePreviewButton.addEventListener('click', previewBatchDeleteImpact);
+    if (deleteCommitButton) deleteCommitButton.addEventListener('click', commitBatchReviewedDelete);
+    if (deleteCleanupRelationships) deleteCleanupRelationships.addEventListener('change', clearBatchDeletePreview);
+    if (deleteCleanupCurations) deleteCleanupCurations.addEventListener('change', clearBatchDeletePreview);
     if (fieldPreviewButton) fieldPreviewButton.addEventListener('click', previewBatchFieldApply);
     if (fieldCommitButton) fieldCommitButton.addEventListener('click', commitBatchFieldApply);
     if (fieldValue) fieldValue.addEventListener('input', clearBatchFieldApplyPreview);
@@ -5747,7 +6225,8 @@ const csvImportState = {
     previewed: false,
     busy: false,
     lastCommitRows: [],
-    lastCommitSummary: null
+    lastCommitSummary: null,
+    followupStep: 'idle'
 };
 
 function parseCsvText(text = '') {
@@ -5947,6 +6426,89 @@ function csvFindBatchRelationshipOptions(parentLabel, currentKey) {
             .filter(Boolean)
             .map(csvNormaliseComparableLabel);
         return labels.includes(wanted);
+    });
+}
+
+function csvNormalisedLabelsForRecordLike(record = {}) {
+    const info = record.info || {};
+    return [info.label, info.label_jp]
+        .filter(Boolean)
+        .map(csvNormaliseComparableLabel)
+        .filter(Boolean);
+}
+
+function csvRelationshipResolutionOptions(label, candidate = {}, kind = 'parent') {
+    const wanted = csvNormaliseComparableLabel(label);
+    if (!wanted) return [];
+
+    const options = [];
+    const batchOptions = csvFindBatchRelationshipOptions(label, candidate.candidateKey);
+    batchOptions.forEach(batchCandidate => {
+        const labels = csvNormalisedLabelsForRecordLike(batchCandidate);
+        options.push({
+            value: `batch:${batchCandidate.candidateKey}`,
+            label: `CSV row ${batchCandidate.rowNumber}: ${csvCandidateDisplayLabel(batchCandidate)}`,
+            exact: labels.includes(wanted),
+            source: 'batch',
+            score: null
+        });
+    });
+
+    const matches = kind === 'child'
+        ? (candidate.childMatches?.[label] || [])
+        : (candidate.parentMatches?.[label] || []);
+
+    matches.forEach(existing => {
+        const labels = csvNormalisedLabelsForRecordLike(existing);
+        options.push({
+            value: `existing:${existing.id}`,
+            label: `Existing: ${csvExistingCandidateLabel(existing)}`,
+            exact: Boolean(existing.exactMatch || labels.includes(wanted)),
+            source: 'existing',
+            score: typeof existing.score === 'number' ? existing.score : null
+        });
+    });
+
+    return options;
+}
+
+function csvRelationshipAutoResolution(label, candidate = {}, kind = 'parent') {
+    const options = csvRelationshipResolutionOptions(label, candidate, kind);
+    const exactOptions = options.filter(option => option.exact);
+    if (exactOptions.length === 1) return exactOptions[0].value;
+    return '';
+}
+
+function csvRelationshipAmbiguityMessage(label, candidate = {}, kind = 'parent') {
+    const options = csvRelationshipResolutionOptions(label, candidate, kind);
+    const exactOptions = options.filter(option => option.exact);
+    if (exactOptions.length > 1) {
+        return `Multiple exact matches for “${label}”. Please choose one.`;
+    }
+
+    const strongFuzzyOptions = options.filter(option => !option.exact && typeof option.score === 'number' && option.score <= 0.08);
+    if (strongFuzzyOptions.length > 1) {
+        return `Several close matches for “${label}”. Please choose one.`;
+    }
+
+    return '';
+}
+
+function autoSelectCsvImportRelationships() {
+    csvImportState.candidates.forEach(candidate => {
+        candidate.parentLabels.forEach(label => {
+            if (!candidate.parentSelections[label]) {
+                const autoValue = csvRelationshipAutoResolution(label, candidate, 'parent');
+                if (autoValue) candidate.parentSelections[label] = autoValue;
+            }
+        });
+
+        candidate.childLabels.forEach(label => {
+            if (!candidate.childSelections[label]) {
+                const autoValue = csvRelationshipAutoResolution(label, candidate, 'child');
+                if (autoValue) candidate.childSelections[label] = autoValue;
+            }
+        });
     });
 }
 
@@ -6197,23 +6759,21 @@ function renderCsvImportCandidate(candidate) {
             none.textContent = 'No parent attachment — confirmed';
             select.appendChild(none);
 
-            const batchOptions = csvFindBatchRelationshipOptions(parentLabel, candidate.candidateKey);
-            batchOptions.forEach(batchCandidate => {
+            csvRelationshipResolutionOptions(parentLabel, candidate, 'parent').forEach(resolutionOption => {
                 const option = document.createElement('option');
-                option.value = `batch:${batchCandidate.candidateKey}`;
-                option.textContent = `CSV row ${batchCandidate.rowNumber}: ${csvCandidateDisplayLabel(batchCandidate)}`;
-                select.appendChild(option);
-            });
-
-            (candidate.parentMatches[parentLabel] || []).forEach(existing => {
-                const option = document.createElement('option');
-                option.value = `existing:${existing.id}`;
-                option.textContent = `Existing: ${csvExistingCandidateLabel(existing)}`;
+                option.value = resolutionOption.value;
+                option.textContent = resolutionOption.label;
+                if (resolutionOption.exact) option.dataset.exact = 'true';
                 select.appendChild(option);
             });
 
             const selected = candidate.parentSelections[parentLabel] || '';
             select.value = selected;
+            const ambiguity = csvRelationshipAmbiguityMessage(parentLabel, candidate, 'parent');
+            if (ambiguity && !selected) {
+                item.classList.add('csv-import-relationship-ambiguous');
+                select.classList.add('csv-import-relationship-ambiguous-select');
+            }
             select.addEventListener('change', () => {
                 candidate.parentSelections[parentLabel] = select.value;
                 updateCsvImportCommitAvailability();
@@ -6221,6 +6781,12 @@ function renderCsvImportCandidate(candidate) {
 
             item.appendChild(labelNode);
             item.appendChild(select);
+            if (ambiguity && !selected) {
+                const hint = document.createElement('span');
+                hint.classList.add('csv-import-relationship-hint');
+                hint.textContent = ambiguity;
+                item.appendChild(hint);
+            }
             parentList.appendChild(item);
         });
         parentsPanel.appendChild(parentList);
@@ -6261,23 +6827,21 @@ function renderCsvImportCandidate(candidate) {
             none.textContent = 'No child attachment — confirmed';
             select.appendChild(none);
 
-            const batchOptions = csvFindBatchRelationshipOptions(childLabel, candidate.candidateKey);
-            batchOptions.forEach(batchCandidate => {
+            csvRelationshipResolutionOptions(childLabel, candidate, 'child').forEach(resolutionOption => {
                 const option = document.createElement('option');
-                option.value = `batch:${batchCandidate.candidateKey}`;
-                option.textContent = `CSV row ${batchCandidate.rowNumber}: ${csvCandidateDisplayLabel(batchCandidate)}`;
-                select.appendChild(option);
-            });
-
-            (candidate.childMatches[childLabel] || []).forEach(existing => {
-                const option = document.createElement('option');
-                option.value = `existing:${existing.id}`;
-                option.textContent = `Existing: ${csvExistingCandidateLabel(existing)}`;
+                option.value = resolutionOption.value;
+                option.textContent = resolutionOption.label;
+                if (resolutionOption.exact) option.dataset.exact = 'true';
                 select.appendChild(option);
             });
 
             const selected = candidate.childSelections[childLabel] || '';
             select.value = selected;
+            const ambiguity = csvRelationshipAmbiguityMessage(childLabel, candidate, 'child');
+            if (ambiguity && !selected) {
+                item.classList.add('csv-import-relationship-ambiguous');
+                select.classList.add('csv-import-relationship-ambiguous-select');
+            }
             select.addEventListener('change', () => {
                 candidate.childSelections[childLabel] = select.value;
                 updateCsvImportCommitAvailability();
@@ -6285,6 +6849,12 @@ function renderCsvImportCandidate(candidate) {
 
             item.appendChild(labelNode);
             item.appendChild(select);
+            if (ambiguity && !selected) {
+                const hint = document.createElement('span');
+                hint.classList.add('csv-import-relationship-hint');
+                hint.textContent = ambiguity;
+                item.appendChild(hint);
+            }
             childList.appendChild(item);
         });
         childrenPanel.appendChild(childList);
@@ -6328,6 +6898,7 @@ async function previewCsvImport() {
 
     csvImportState.busy = true;
     updateCsvImportCommitAvailability();
+    openCsvImportCommitProgressModal(active.length);
 
     try {
         const text = await file.text();
@@ -6388,6 +6959,7 @@ async function previewCsvImport() {
         csvImportState.fileName = file.name;
         csvImportState.candidates = candidates;
         csvImportState.previewed = true;
+        autoSelectCsvImportRelationships();
         renderCsvImportCandidates();
     } catch (error) {
         console.error('CSV import preview failed:', error);
@@ -6506,52 +7078,130 @@ async function queueCsvImportedMissingImages(commitRows = [], wantedTypes = getC
     return addRecordsToImageQueue(queueable, { source: 'csv' });
 }
 
+function getCsvImportFollowupElements() {
+    return {
+        modal: document.getElementById('csv-import-followup-modal'),
+        title: document.getElementById('csv-import-followup-title'),
+        summary: document.getElementById('csv-import-followup-summary'),
+        loading: document.getElementById('csv-import-followup-loading'),
+        loadingText: document.getElementById('csv-import-followup-loading-text'),
+        curationStep: document.getElementById('csv-import-followup-step-curation'),
+        imageStep: document.getElementById('csv-import-followup-step-images'),
+        nextButton: document.getElementById('csv-import-followup-next'),
+        closeButton: document.getElementById('csv-import-followup-close'),
+        status: document.getElementById('csv-import-followup-status'),
+        nameInput: document.getElementById('csv-import-followup-curation-name'),
+        includeCreated: document.getElementById('csv-import-followup-include-created'),
+        includeMerged: document.getElementById('csv-import-followup-include-merged'),
+        queuePeople: document.getElementById('csv-import-followup-queue-people'),
+        queueArtworkBooks: document.getElementById('csv-import-followup-queue-artworkbooks'),
+        skipCuration: document.getElementById('csv-import-followup-skip-curation'),
+        skipImages: document.getElementById('csv-import-followup-skip-images')
+    };
+}
+
 function setCsvImportFollowupBusy(isBusy) {
-    const applyButton = document.getElementById('csv-import-followup-apply');
-    const doneButton = document.getElementById('csv-import-followup-done');
-    const closeButton = document.getElementById('csv-import-followup-close');
-    [applyButton, doneButton, closeButton].forEach(button => {
-        if (button) button.disabled = Boolean(isBusy);
-    });
+    const { nextButton } = getCsvImportFollowupElements();
+    if (nextButton) nextButton.disabled = Boolean(isBusy);
 }
 
 function closeCsvImportFollowupModal() {
-    const modal = document.getElementById('csv-import-followup-modal');
+    const { modal } = getCsvImportFollowupElements();
     if (modal) modal.classList.add('hidden');
+    csvImportState.followupStep = 'idle';
 }
 
-function openCsvImportFollowupModal(summary = {}) {
-    const modal = document.getElementById('csv-import-followup-modal');
-    const summaryEl = document.getElementById('csv-import-followup-summary');
-    const statusEl = document.getElementById('csv-import-followup-status');
-    const nameInput = document.getElementById('csv-import-followup-curation-name');
-    const createdBox = document.getElementById('csv-import-followup-include-created');
-    const mergedBox = document.getElementById('csv-import-followup-include-merged');
-    const peopleBox = document.getElementById('csv-import-followup-queue-people');
-    const booksBox = document.getElementById('csv-import-followup-queue-artworkbooks');
+function syncCsvImportFollowupSkipControls() {
+    const elements = getCsvImportFollowupElements();
+    const skipCuration = Boolean(elements.skipCuration?.checked);
+    const skipImages = Boolean(elements.skipImages?.checked);
 
-    if (!modal) return;
+    [elements.nameInput, elements.includeCreated, elements.includeMerged].forEach(control => {
+        if (control) control.disabled = skipCuration;
+    });
+
+    [elements.queuePeople, elements.queueArtworkBooks].forEach(control => {
+        if (control) control.disabled = skipImages;
+    });
+
+    elements.curationStep?.classList.toggle('csv-import-followup-step-skipped', skipCuration);
+    elements.imageStep?.classList.toggle('csv-import-followup-step-skipped', skipImages);
+}
+
+function showCsvImportFollowupStep(step) {
+    const elements = getCsvImportFollowupElements();
+    csvImportState.followupStep = step;
+
+    elements.loading?.classList.toggle('hidden', step !== 'committing' && step !== 'applying');
+    elements.curationStep?.classList.toggle('hidden', step !== 'curation');
+    elements.imageStep?.classList.toggle('hidden', step !== 'images');
+
+    if (elements.nextButton) {
+        elements.nextButton.hidden = step === 'committing' || step === 'applying';
+        elements.nextButton.textContent = step === 'images' ? 'Apply follow-up' : 'Next';
+        elements.nextButton.disabled = step === 'committing' || step === 'applying';
+    }
+
+    if (step === 'curation') {
+        if (elements.title) elements.title.textContent = 'CSV import follow-up: saved diagram';
+        if (elements.summary) {
+            const summary = csvImportState.lastCommitSummary || {};
+            elements.summary.textContent = `Committed: ${summary.created || 0} created, ${summary.merged || 0} merged, ${summary.skipped || 0} skipped.`;
+        }
+        if (elements.status) elements.status.textContent = 'Optional step 1 of 2.';
+        elements.nameInput?.focus();
+    } else if (step === 'images') {
+        if (elements.title) elements.title.textContent = 'CSV import follow-up: image queue';
+        if (elements.status) elements.status.textContent = 'Optional step 2 of 2.';
+    }
+
+    syncCsvImportFollowupSkipControls();
+}
+
+function openCsvImportCommitProgressModal(activeCount = 0) {
+    const elements = getCsvImportFollowupElements();
+    if (!elements.modal) return;
+
+    if (elements.title) elements.title.textContent = 'Committing CSV import';
+    if (elements.summary) elements.summary.textContent = `Writing ${activeCount} reviewed row${activeCount === 1 ? '' : 's'} to the database…`;
+    if (elements.loadingText) elements.loadingText.textContent = 'Committing records and relationships. Follow-up options will appear when this finishes.';
+    if (elements.status) elements.status.textContent = '';
+    elements.modal.classList.remove('hidden');
+    showCsvImportFollowupStep('committing');
+}
+
+function prepareCsvImportFollowupModal(summary = {}) {
+    const elements = getCsvImportFollowupElements();
+    if (!elements.modal) return;
 
     const created = summary?.created || 0;
     const merged = summary?.merged || 0;
-    const skipped = summary?.skipped || 0;
-    if (summaryEl) {
-        summaryEl.textContent = `Committed: ${created} created, ${merged} merged, ${skipped} skipped.`;
+    if (elements.nameInput) {
+        elements.nameInput.value = '';
+        elements.nameInput.placeholder = csvImportState.fileName
+            ? csvImportState.fileName.replace(/\.csv$/i, '')
+            : 'e.g. Imported Deleuze / Guattari books';
     }
-    if (statusEl) statusEl.textContent = '';
-    if (nameInput) {
-        nameInput.value = '';
-        if (csvImportState.fileName) {
-            nameInput.placeholder = csvImportState.fileName.replace(/\.csv$/i, '');
-        }
+    if (elements.includeCreated) elements.includeCreated.checked = created > 0;
+    if (elements.includeMerged) elements.includeMerged.checked = merged > 0;
+    if (elements.queuePeople) elements.queuePeople.checked = false;
+    if (elements.queueArtworkBooks) elements.queueArtworkBooks.checked = false;
+    if (elements.skipCuration) elements.skipCuration.checked = false;
+    if (elements.skipImages) elements.skipImages.checked = false;
+
+    elements.modal.classList.remove('hidden');
+    showCsvImportFollowupStep('curation');
+}
+
+async function advanceCsvImportFollowup() {
+    if (csvImportState.followupStep === 'curation') {
+        showCsvImportFollowupStep('images');
+        return;
     }
-    if (createdBox) createdBox.checked = created > 0;
-    if (mergedBox) mergedBox.checked = merged > 0;
-    if (peopleBox) peopleBox.checked = false;
-    if (booksBox) booksBox.checked = false;
-    setCsvImportFollowupBusy(false);
-    modal.classList.remove('hidden');
-    nameInput?.focus();
+
+    if (csvImportState.followupStep === 'images') {
+        await applyCsvImportFollowup();
+    }
 }
 
 async function createCurationFromCsvImport(recordIds = [], curationName = '') {
@@ -6580,28 +7230,39 @@ async function createCurationFromCsvImport(recordIds = [], curationName = '') {
 }
 
 async function applyCsvImportFollowup() {
-    const statusEl = document.getElementById('csv-import-followup-status');
-    const curationName = document.getElementById('csv-import-followup-curation-name')?.value || '';
-    const includeCreated = Boolean(document.getElementById('csv-import-followup-include-created')?.checked);
-    const includeMerged = Boolean(document.getElementById('csv-import-followup-include-merged')?.checked);
-    const wantedTypes = getCsvFollowupImageQueueTypes();
+    const elements = getCsvImportFollowupElements();
+    const curationName = elements.nameInput?.value || '';
+    const includeCreated = Boolean(elements.includeCreated?.checked);
+    const includeMerged = Boolean(elements.includeMerged?.checked);
+    const skipCuration = Boolean(elements.skipCuration?.checked);
+    const skipImages = Boolean(elements.skipImages?.checked);
+    const wantedTypes = skipImages ? new Set() : getCsvFollowupImageQueueTypes();
     const committedRows = getCommittedCsvRowsForFollowup({ includeCreated, includeMerged });
     const recordIds = getUniqueCommittedCsvRecordIds({ includeCreated, includeMerged });
-    const wantsCuration = String(curationName || '').trim() !== '';
-    const wantsQueue = wantedTypes.size > 0;
+    const wantsCuration = !skipCuration && String(curationName || '').trim() !== '';
+    const wantsQueue = !skipImages && wantedTypes.size > 0;
 
     if (!wantsCuration && !wantsQueue) {
+        const commitStatus = document.getElementById('csv-import-commit-status');
+        if (commitStatus) commitStatus.textContent = 'CSV import committed. Follow-up skipped.';
         closeCsvImportFollowupModal();
         return;
     }
 
-    if (!includeCreated && !includeMerged) {
-        alert('Choose created and/or merged records for the follow-up.');
+    if ((wantsCuration || wantsQueue) && !includeCreated && !includeMerged) {
+        alert('Choose created and/or merged records for the follow-up, or tick skip this step.');
         return;
     }
 
     setCsvImportFollowupBusy(true);
-    if (statusEl) statusEl.textContent = 'Applying follow-up…';
+    csvImportState.followupStep = 'applying';
+    elements.loading?.classList.remove('hidden');
+    elements.curationStep?.classList.add('hidden');
+    elements.imageStep?.classList.add('hidden');
+    if (elements.nextButton) elements.nextButton.hidden = true;
+    if (elements.title) elements.title.textContent = 'Applying CSV follow-up';
+    if (elements.loadingText) elements.loadingText.textContent = 'Creating saved diagram and/or sending records to the Image Queue…';
+    if (elements.status) elements.status.textContent = '';
 
     try {
         const messages = [];
@@ -6617,13 +7278,15 @@ async function applyCsvImportFollowup() {
                 : 'No matching missing-image records were sent to Image Queue.');
         }
 
-        if (statusEl) statusEl.textContent = messages.join(' ');
+        const finalMessage = messages.join(' ') || 'CSV import committed.';
         const commitStatus = document.getElementById('csv-import-commit-status');
-        if (commitStatus) commitStatus.textContent = messages.join(' ');
+        if (commitStatus) commitStatus.textContent = finalMessage;
+        closeCsvImportFollowupModal();
     } catch (error) {
         console.error('CSV import follow-up failed:', error);
-        if (statusEl) statusEl.textContent = `Follow-up failed: ${error.message}`;
+        if (elements.status) elements.status.textContent = `Follow-up failed: ${error.message}`;
         alert(`CSV import follow-up failed: ${error.message}`);
+        showCsvImportFollowupStep('images');
     } finally {
         setCsvImportFollowupBusy(false);
     }
@@ -6650,6 +7313,7 @@ async function commitCsvImport() {
 
     csvImportState.busy = true;
     updateCsvImportCommitAvailability();
+    openCsvImportCommitProgressModal(active.length);
 
     try {
         const response = await fetch(`${baseURL}/api/reference/import-review/commit`, {
@@ -6673,9 +7337,13 @@ async function commitCsvImport() {
             summary.classList.add('csv-import-summary');
             summary.textContent = completeText;
         }
-        openCsvImportFollowupModal(data.summary || {});
+        prepareCsvImportFollowupModal(data.summary || {});
     } catch (error) {
         console.error('CSV import commit failed:', error);
+        const elements = getCsvImportFollowupElements();
+        if (elements.title) elements.title.textContent = 'CSV import failed';
+        if (elements.loadingText) elements.loadingText.textContent = `Commit failed: ${error.message}`;
+        if (elements.status) elements.status.textContent = 'Close this dialog, fix the issue, and try again.';
         alert(`CSV import commit failed: ${error.message}`);
     } finally {
         csvImportState.busy = false;
@@ -6708,15 +7376,17 @@ function initialiseCsvImportReview() {
     const previewButton = document.getElementById('csv-import-preview');
     const clearButton = document.getElementById('csv-import-clear');
     const commitButton = document.getElementById('csv-import-commit');
-    const followupApplyButton = document.getElementById('csv-import-followup-apply');
-    const followupDoneButton = document.getElementById('csv-import-followup-done');
+    const followupNextButton = document.getElementById('csv-import-followup-next');
     const followupCloseButton = document.getElementById('csv-import-followup-close');
+    const followupSkipCuration = document.getElementById('csv-import-followup-skip-curation');
+    const followupSkipImages = document.getElementById('csv-import-followup-skip-images');
     if (previewButton) previewButton.addEventListener('click', previewCsvImport);
     if (clearButton) clearButton.addEventListener('click', clearCsvImport);
     if (commitButton) commitButton.addEventListener('click', commitCsvImport);
-    if (followupApplyButton) followupApplyButton.addEventListener('click', applyCsvImportFollowup);
-    if (followupDoneButton) followupDoneButton.addEventListener('click', closeCsvImportFollowupModal);
+    if (followupNextButton) followupNextButton.addEventListener('click', advanceCsvImportFollowup);
     if (followupCloseButton) followupCloseButton.addEventListener('click', closeCsvImportFollowupModal);
+    if (followupSkipCuration) followupSkipCuration.addEventListener('change', syncCsvImportFollowupSkipControls);
+    if (followupSkipImages) followupSkipImages.addEventListener('change', syncCsvImportFollowupSkipControls);
     updateCsvImportCommitAvailability();
 }
 

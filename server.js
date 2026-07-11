@@ -73,6 +73,90 @@ function normaliseInfo(info = {}) {
 }
 
 
+function uniqueRelationshipArray(value) {
+  return [...new Set(normaliseRelationshipArray(value))];
+}
+
+function getArrayDiff(before = [], after = []) {
+  const beforeSet = new Set(uniqueRelationshipArray(before));
+  const afterSet = new Set(uniqueRelationshipArray(after));
+  return {
+    added: [...afterSet].filter(id => !beforeSet.has(id)),
+    removed: [...beforeSet].filter(id => !afterSet.has(id))
+  };
+}
+
+async function findMissingRelationshipTargets(collection, ids = []) {
+  const uniqueIds = uniqueRelationshipArray(ids);
+  if (!uniqueIds.length) return [];
+
+  const existing = await collection
+    .find({ id: { $in: uniqueIds } }, { projection: { id: 1 } })
+    .toArray();
+
+  const existingSet = new Set(existing.map(record => record.id).filter(Boolean));
+  return uniqueIds.filter(id => !existingSet.has(id));
+}
+
+function summariseRelationshipSync(diff = {}) {
+  return {
+    addedParentIds: diff.addedParentIds || [],
+    removedParentIds: diff.removedParentIds || [],
+    addedChildIds: diff.addedChildIds || [],
+    removedChildIds: diff.removedChildIds || [],
+    changedCount:
+      (diff.addedParentIds || []).length +
+      (diff.removedParentIds || []).length +
+      (diff.addedChildIds || []).length +
+      (diff.removedChildIds || []).length
+  };
+}
+
+async function applyReciprocalRelationshipChanges(collection, recordId, before = {}, after = {}) {
+  const parentDiff = getArrayDiff(before.parentId, after.parentId);
+  const childDiff = getArrayDiff(before.children, after.children);
+
+  const summary = summariseRelationshipSync({
+    addedParentIds: parentDiff.added,
+    removedParentIds: parentDiff.removed,
+    addedChildIds: childDiff.added,
+    removedChildIds: childDiff.removed
+  });
+
+  if (!summary.changedCount) return summary;
+
+  if (parentDiff.added.length) {
+    await collection.updateMany(
+      { id: { $in: parentDiff.added } },
+      { $addToSet: { children: recordId } }
+    );
+  }
+
+  if (parentDiff.removed.length) {
+    await collection.updateMany(
+      { id: { $in: parentDiff.removed } },
+      { $pull: { children: recordId } }
+    );
+  }
+
+  if (childDiff.added.length) {
+    await collection.updateMany(
+      { id: { $in: childDiff.added } },
+      { $addToSet: { parentId: recordId } }
+    );
+  }
+
+  if (childDiff.removed.length) {
+    await collection.updateMany(
+      { id: { $in: childDiff.removed } },
+      { $pull: { parentId: recordId } }
+    );
+  }
+
+  return summary;
+}
+
+
 function normaliseImportComparableLabel(value = '') {
   return String(value || '')
     .normalize('NFKC')
@@ -178,6 +262,44 @@ function buildReferenceImportFuse(documents = []) {
   });
 }
 
+function tokeniseImportComparableLabel(value = '') {
+  return normaliseImportComparableLabel(value)
+    .split(' ')
+    .map(token => token.trim())
+    .filter(Boolean);
+}
+
+function hasImportTokenAffinity(query = '', labels = []) {
+  const queryTokens = tokeniseImportComparableLabel(query).filter(token => token.length >= 3);
+  if (!queryTokens.length) return false;
+
+  const labelTokens = labels.flatMap(label => tokeniseImportComparableLabel(label));
+  if (!labelTokens.length) return false;
+
+  return queryTokens.some(queryToken => labelTokens.some(labelToken => {
+    if (queryToken === labelToken) return true;
+    if (queryToken.length >= 5 && labelToken.startsWith(queryToken)) return true;
+    if (labelToken.length >= 5 && queryToken.startsWith(labelToken)) return true;
+    return false;
+  }));
+}
+
+function isAcceptableImportSearchCandidate(candidate = {}, query = '') {
+  if (candidate.exactMatch) return true;
+
+  const wanted = normaliseImportComparableLabel(query);
+  const compactLength = wanted.replace(/\s+/g, '').length;
+  if (compactLength <= 4) return false;
+
+  const labels = [candidate.info?.label, candidate.info?.label_jp].filter(Boolean);
+  if (!hasImportTokenAffinity(query, labels)) return false;
+
+  const score = typeof candidate.score === 'number' ? candidate.score : 1;
+  const queryTokens = tokeniseImportComparableLabel(query);
+  const maxScore = queryTokens.length <= 1 ? 0.16 : 0.24;
+  return score <= maxScore;
+}
+
 function mapImportSearchCandidate(result, query = '') {
   const item = result.item || result;
   const info = item.info || {};
@@ -198,8 +320,10 @@ function searchImportCandidates(fuse, queries = [], limit = 5) {
   const resultMap = new Map();
 
   queries.filter(Boolean).forEach(query => {
-    fuse.search(String(query), { limit }).forEach(result => {
-      const candidate = mapImportSearchCandidate(result, query);
+    const safeQuery = String(query || '').trim();
+    fuse.search(safeQuery, { limit: Math.max(limit * 8, 20) }).forEach(result => {
+      const candidate = mapImportSearchCandidate(result, safeQuery);
+      if (!isAcceptableImportSearchCandidate(candidate, safeQuery)) return;
       const previous = resultMap.get(candidate.id);
       if (!previous || candidate.exactMatch || (candidate.score ?? 1) < (previous.score ?? 1)) {
         resultMap.set(candidate.id, candidate);
@@ -2564,6 +2688,129 @@ function summariseBatchRootReference(document = {}) {
   };
 }
 
+
+function normaliseCurationNodeId(node = {}) {
+  return String(node?.id || node?.info?.id || '').trim();
+}
+
+function normaliseCurationConnection(connection = {}, fallbackType = 'custom') {
+  const source = String(connection?.source || '').trim();
+  const target = String(connection?.target || '').trim();
+  if (!source || !target) return null;
+  return {
+    source,
+    target,
+    type: String(connection?.type || fallbackType || 'custom').trim() || 'custom'
+  };
+}
+
+function addUniqueCurationConnection(map, connection) {
+  if (!connection?.source || !connection?.target) return;
+  const key = `${connection.type || 'database'}::${connection.source}::${connection.target}`;
+  if (!map.has(key)) map.set(key, connection);
+}
+
+function buildDatabaseCurationConnections(records = [], includedIds = []) {
+  const includedSet = new Set(includedIds.map(id => String(id || '').trim()).filter(Boolean));
+  const connectionMap = new Map();
+
+  records.forEach(record => {
+    const id = String(record?.id || '').trim();
+    if (!id || !includedSet.has(id)) return;
+
+    normaliseRelationshipArray(record.children).forEach(childId => {
+      if (childId !== id && includedSet.has(childId)) {
+        addUniqueCurationConnection(connectionMap, { source: id, target: childId, type: 'database' });
+      }
+    });
+
+    normaliseRelationshipArray(record.parentId).forEach(parentId => {
+      if (parentId !== id && includedSet.has(parentId)) {
+        addUniqueCurationConnection(connectionMap, { source: parentId, target: id, type: 'database' });
+      }
+    });
+  });
+
+  return [...connectionMap.values()].sort((a, b) => (
+    `${a.source}|${a.target}`.localeCompare(`${b.source}|${b.target}`)
+  ));
+}
+
+function getCustomCurationConnections(curation = {}) {
+  const customMap = new Map();
+
+  (Array.isArray(curation.customConnections) ? curation.customConnections : [])
+    .map(connection => normaliseCurationConnection(connection, 'custom'))
+    .filter(Boolean)
+    .forEach(connection => addUniqueCurationConnection(customMap, connection));
+
+  (Array.isArray(curation.curationConnections) ? curation.curationConnections : [])
+    .map(connection => normaliseCurationConnection(connection, 'database'))
+    .filter(connection => connection && connection.type === 'custom')
+    .forEach(connection => addUniqueCurationConnection(customMap, connection));
+
+  return [...customMap.values()];
+}
+
+async function buildCurationConnectionSnapshot(referenceCollection, includedIds = [], existingCuration = {}) {
+  const orderedIds = [...new Set(includedIds.map(id => String(id || '').trim()).filter(Boolean))];
+  if (!orderedIds.length) return { databaseConnections: [], customConnections: [], curationConnections: [] };
+
+  const records = await referenceCollection.find(
+    { id: { $in: orderedIds } },
+    { projection: { id: 1, parentId: 1, children: 1 } }
+  ).toArray();
+
+  const databaseConnections = buildDatabaseCurationConnections(records, orderedIds);
+  const includedSet = new Set(orderedIds);
+  const customConnections = getCustomCurationConnections(existingCuration).filter(connection => (
+    includedSet.has(connection.source) && includedSet.has(connection.target)
+  ));
+  const curationConnections = [...databaseConnections, ...customConnections];
+
+  return { databaseConnections, customConnections, curationConnections };
+}
+
+function summariseDeleteImpactRecord(document = {}) {
+  const info = document.info || {};
+  return {
+    id: document.id,
+    label: info.label || document.id,
+    label_jp: info.label_jp || '',
+    type: info.type || ''
+  };
+}
+
+function curationContainsAnyDeletedId(curation = {}, deletedIds = new Set()) {
+  const nodes = Array.isArray(curation.includedNodes) ? curation.includedNodes : [];
+  const connections = [
+    ...(Array.isArray(curation.curationConnections) ? curation.curationConnections : []),
+    ...(Array.isArray(curation.customConnections) ? curation.customConnections : [])
+  ];
+
+  return nodes.some(node => deletedIds.has(normaliseCurationNodeId(node)))
+    || connections.some(connection => deletedIds.has(String(connection?.source || '').trim()) || deletedIds.has(String(connection?.target || '').trim()));
+}
+
+function cleanCurationAfterRecordDeletion(curation = {}, deletedIds = new Set()) {
+  const includedNodes = (Array.isArray(curation.includedNodes) ? curation.includedNodes : [])
+    .filter(node => !deletedIds.has(normaliseCurationNodeId(node)));
+
+  const curationConnections = (Array.isArray(curation.curationConnections) ? curation.curationConnections : [])
+    .filter(connection => (
+      !deletedIds.has(String(connection?.source || '').trim())
+      && !deletedIds.has(String(connection?.target || '').trim())
+    ));
+
+  const customConnections = (Array.isArray(curation.customConnections) ? curation.customConnections : [])
+    .filter(connection => (
+      !deletedIds.has(String(connection?.source || '').trim())
+      && !deletedIds.has(String(connection?.target || '').trim())
+    ));
+
+  return { includedNodes, curationConnections, customConnections };
+}
+
 // Fast-ish typed source search for Batch Records. This keeps the UI from
 // always fuzzy-searching every reference record when the user knows they only
 // want paradigms / people / books, and it also introduces saved curations as a
@@ -3022,20 +3269,53 @@ app.get('/api/reference/:id', async (req, res) => {
   }
 });
 
-// Delete selected duplicates
+// Delete selected duplicates. Legacy endpoint, now with relationship/curation cleanup.
 app.delete('/api/reference/delete-duplicates', async (req, res) => {
   try {
-      const { ids } = req.body;
-      if (!ids || !Array.isArray(ids)) {
+      const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(id => String(id || '').trim()).filter(Boolean))];
+      if (!ids.length) {
           return res.status(400).json({ message: 'Invalid request, no IDs provided.' });
       }
 
-      const result = await db.collection('reference').deleteMany({ id: { $in: ids } });
+      const deletedIdSet = new Set(ids);
+      const referenceCollection = db.collection('reference');
+      const curationCollection = db.collection('curation');
+
+      await referenceCollection.updateMany(
+          { id: { $nin: ids } },
+          { $pull: { parentId: { $in: ids }, children: { $in: ids } } }
+      );
+
+      const affectedCurations = await curationCollection.find({
+          $or: [
+              { 'includedNodes.id': { $in: ids } },
+              { 'curationConnections.source': { $in: ids } },
+              { 'curationConnections.target': { $in: ids } },
+              { 'customConnections.source': { $in: ids } },
+              { 'customConnections.target': { $in: ids } }
+          ]
+      }).toArray();
+
+      let cleanedCurationCount = 0;
+      for (const curation of affectedCurations) {
+          if (!curationContainsAnyDeletedId(curation, deletedIdSet)) continue;
+          const cleaned = cleanCurationAfterRecordDeletion(curation, deletedIdSet);
+          await curationCollection.updateOne(
+              { _id: curation._id },
+              { $set: { ...cleaned, updatedAt: new Date().toISOString() } }
+          );
+          cleanedCurationCount += 1;
+      }
+
+      const result = await referenceCollection.deleteMany({ id: { $in: ids } });
       if (result.deletedCount === 0) {
           return res.status(404).json({ message: 'No matching records found to delete.' });
       }
 
-      res.json({ success: true, message: `${result.deletedCount} records deleted.` });
+      res.json({
+          success: true,
+          message: `${result.deletedCount} records deleted; cleaned ${cleanedCurationCount} saved curation${cleanedCurationCount === 1 ? '' : 's'}.`
+      });
   } catch (err) {
       console.error('Error deleting duplicates:', err);
       res.status(500).json({ message: 'Internal server error' });
@@ -3431,7 +3711,7 @@ app.post('/api/curations/from-records', async (req, res) => {
 
     const records = await referenceCollection.find(
       { id: { $in: recordIds } },
-      { projection: { id: 1, 'info.color': 1 } }
+      { projection: { id: 1, parentId: 1, children: 1, 'info.color': 1 } }
     ).toArray();
     const foundIds = new Set(records.map(record => record.id).filter(Boolean));
     const missingRecordIds = recordIds.filter(id => !foundIds.has(id));
@@ -3451,6 +3731,12 @@ app.post('/api/curations/from-records', async (req, res) => {
       return res.status(400).json({ message: 'None of the supplied record ids exist in the reference database.' });
     }
 
+    const includedIds = includedNodes.map(node => node.id).filter(Boolean);
+    const { databaseConnections, curationConnections } = await buildCurationConnectionSnapshot(
+      referenceCollection,
+      includedIds
+    );
+
     const now = new Date().toISOString();
     const curation = {
       curationId: uuidv4(),
@@ -3458,9 +3744,12 @@ app.post('/api/curations/from-records', async (req, res) => {
       description,
       includedNodes,
       customConnections: [],
-      curationConnections: [],
+      curationConnections,
       curationSubtypes: [],
-      visualSettings: {},
+      visualSettings: {
+        linkColour: '#999999',
+        linkStrokeWidth: 3
+      },
       importedCurationSources: [],
       sourceMeta: {
         createdBy: 'modifier-app',
@@ -3479,6 +3768,8 @@ app.post('/api/curations/from-records', async (req, res) => {
       curationId: curation.curationId,
       name: curation.name,
       includedCount: includedNodes.length,
+      connectionCount: curationConnections.length,
+      databaseConnectionCount: databaseConnections.length,
       missingRecordIds
     });
   } catch (err) {
@@ -3487,13 +3778,239 @@ app.post('/api/curations/from-records', async (req, res) => {
   }
 });
 
+
+// Rebuild saved curation connection overlay from canonical reference relationships.
+// This repairs modifier-created curations whose includedNodes were correct but
+// whose curationConnections were empty.
+app.post('/api/curations/:curationId/rebuild-connections', async (req, res) => {
+  try {
+    const curationId = String(req.params.curationId || '').trim();
+    if (!curationId) {
+      return res.status(400).json({ message: 'curationId is required.' });
+    }
+
+    const referenceCollection = db.collection('reference');
+    const curationCollection = db.collection('curation');
+    const curation = await curationCollection.findOne({ curationId });
+
+    if (!curation) {
+      return res.status(404).json({ message: 'Saved curation not found.' });
+    }
+
+    const includedIds = (Array.isArray(curation.includedNodes) ? curation.includedNodes : [])
+      .map(normaliseCurationNodeId)
+      .filter(Boolean);
+
+    const { databaseConnections, customConnections, curationConnections } = await buildCurationConnectionSnapshot(
+      referenceCollection,
+      includedIds,
+      curation
+    );
+
+    const now = new Date().toISOString();
+    await curationCollection.updateOne(
+      { curationId },
+      {
+        $set: {
+          curationConnections,
+          customConnections,
+          updatedAt: now,
+          'sourceMeta.lastConnectionRebuildAt': now,
+          'sourceMeta.lastConnectionRebuildDatabaseCount': databaseConnections.length,
+          'sourceMeta.lastConnectionRebuildCustomCount': customConnections.length
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      curationId,
+      includedCount: includedIds.length,
+      databaseConnectionCount: databaseConnections.length,
+      customConnectionCount: customConnections.length,
+      curationConnectionCount: curationConnections.length,
+      message: `Rebuilt ${databaseConnections.length} database connection${databaseConnections.length === 1 ? '' : 's'} for “${curation.name || curationId}”.`
+    });
+  } catch (err) {
+    console.error('Error rebuilding curation connections:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Preview delete impact before removing canonical records.
+app.post('/api/reference/delete-impact', async (req, res) => {
+  try {
+    const ids = [...new Set(
+      (Array.isArray(req.body?.ids) ? req.body.ids : [])
+        .map(id => String(id || '').trim())
+        .filter(Boolean)
+    )];
+
+    if (!ids.length) {
+      return res.status(400).json({ message: 'At least one record id is required.' });
+    }
+
+    const deletedIdSet = new Set(ids);
+    const referenceCollection = db.collection('reference');
+    const curationCollection = db.collection('curation');
+
+    const records = await referenceCollection.find({ id: { $in: ids } }).toArray();
+    const foundIdSet = new Set(records.map(record => record.id).filter(Boolean));
+    const missingIds = ids.filter(id => !foundIdSet.has(id));
+
+    const relationshipReferences = await referenceCollection.find({
+      id: { $nin: ids },
+      $or: [
+        { parentId: { $in: ids } },
+        { children: { $in: ids } }
+      ]
+    }).toArray();
+
+    const affectedCurations = await curationCollection.find({
+      $or: [
+        { 'includedNodes.id': { $in: ids } },
+        { 'curationConnections.source': { $in: ids } },
+        { 'curationConnections.target': { $in: ids } },
+        { 'customConnections.source': { $in: ids } },
+        { 'customConnections.target': { $in: ids } }
+      ]
+    }).toArray();
+
+    const curationSummaries = affectedCurations
+      .filter(curation => curationContainsAnyDeletedId(curation, deletedIdSet))
+      .map(curation => ({
+        curationId: curation.curationId || String(curation._id || ''),
+        name: curation.name || curation.title || curation.curationId || String(curation._id || ''),
+        includedNodeHits: (Array.isArray(curation.includedNodes) ? curation.includedNodes : [])
+          .filter(node => deletedIdSet.has(normaliseCurationNodeId(node))).length,
+        connectionHits: [
+          ...(Array.isArray(curation.curationConnections) ? curation.curationConnections : []),
+          ...(Array.isArray(curation.customConnections) ? curation.customConnections : [])
+        ].filter(connection => deletedIdSet.has(String(connection?.source || '').trim()) || deletedIdSet.has(String(connection?.target || '').trim())).length
+      }));
+
+    res.json({
+      success: true,
+      requestedIds: ids,
+      records: records.map(summariseDeleteImpactRecord),
+      missingIds,
+      relationshipReferences: relationshipReferences.map(document => ({
+        ...summariseDeleteImpactRecord(document),
+        parentHits: normaliseRelationshipArray(document.parentId).filter(id => deletedIdSet.has(id)),
+        childHits: normaliseRelationshipArray(document.children).filter(id => deletedIdSet.has(id))
+      })),
+      curations: curationSummaries,
+      summary: {
+        requestedCount: ids.length,
+        foundCount: records.length,
+        missingCount: missingIds.length,
+        relationshipReferenceCount: relationshipReferences.length,
+        affectedCurationCount: curationSummaries.length
+      }
+    });
+  } catch (err) {
+    console.error('Error previewing delete impact:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+// Reviewed delete that can clean relationships and saved curation overlays.
+app.post('/api/reference/delete-reviewed', async (req, res) => {
+  try {
+    const ids = [...new Set(
+      (Array.isArray(req.body?.ids) ? req.body.ids : [])
+        .map(id => String(id || '').trim())
+        .filter(Boolean)
+    )];
+    const cleanupRelationships = req.body?.cleanupRelationships !== false;
+    const cleanupCurations = req.body?.cleanupCurations !== false;
+
+    if (!ids.length) {
+      return res.status(400).json({ message: 'At least one record id is required.' });
+    }
+
+    const deletedIdSet = new Set(ids);
+    const referenceCollection = db.collection('reference');
+    const curationCollection = db.collection('curation');
+
+    const records = await referenceCollection.find({ id: { $in: ids } }).toArray();
+    if (!records.length) {
+      return res.status(404).json({ message: 'No matching records found to delete.' });
+    }
+
+    let relationshipCleanup = { matchedCount: 0, modifiedCount: 0 };
+    if (cleanupRelationships) {
+      relationshipCleanup = await referenceCollection.updateMany(
+        { id: { $nin: ids } },
+        {
+          $pull: {
+            parentId: { $in: ids },
+            children: { $in: ids }
+          }
+        }
+      );
+    }
+
+    let cleanedCurations = [];
+    if (cleanupCurations) {
+      const affectedCurations = await curationCollection.find({
+        $or: [
+          { 'includedNodes.id': { $in: ids } },
+          { 'curationConnections.source': { $in: ids } },
+          { 'curationConnections.target': { $in: ids } },
+          { 'customConnections.source': { $in: ids } },
+          { 'customConnections.target': { $in: ids } }
+        ]
+      }).toArray();
+
+      for (const curation of affectedCurations) {
+        if (!curationContainsAnyDeletedId(curation, deletedIdSet)) continue;
+        const cleaned = cleanCurationAfterRecordDeletion(curation, deletedIdSet);
+        await curationCollection.updateOne(
+          { _id: curation._id },
+          {
+            $set: {
+              ...cleaned,
+              updatedAt: new Date().toISOString()
+            }
+          }
+        );
+        cleanedCurations.push({
+          curationId: curation.curationId || String(curation._id || ''),
+          name: curation.name || curation.title || curation.curationId || String(curation._id || ''),
+          includedCount: cleaned.includedNodes.length,
+          connectionCount: cleaned.curationConnections.length
+        });
+      }
+    }
+
+    const deleteResult = await referenceCollection.deleteMany({ id: { $in: ids } });
+
+    res.json({
+      success: true,
+      deletedCount: deleteResult.deletedCount,
+      deletedRecords: records.map(summariseDeleteImpactRecord),
+      relationshipCleanup: {
+        matchedCount: relationshipCleanup.matchedCount || 0,
+        modifiedCount: relationshipCleanup.modifiedCount || 0
+      },
+      cleanedCurations,
+      message: `Deleted ${deleteResult.deletedCount} record${deleteResult.deletedCount === 1 ? '' : 's'}${cleanupCurations ? `; cleaned ${cleanedCurations.length} saved curation${cleanedCurations.length === 1 ? '' : 's'}` : ''}.`
+    });
+  } catch (err) {
+    console.error('Error applying reviewed delete:', err);
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
 // Update an existing record. Parent/child arrays are optional root-level edits.
-// They deliberately update only this record; reciprocal links are not created here.
+// When syncRelationships is true, reciprocal links are also added/removed.
 app.put('/api/reference/update/:id', async (req, res) => {
   try {
       const id = req.params.id;
       const updatedInfo = req.body.info;
       const collection = db.collection('reference');
+      const syncRelationships = req.body.syncRelationships === true;
 
       if (!updatedInfo || typeof updatedInfo !== 'object' || Array.isArray(updatedInfo)) {
           return res.status(400).json({ message: 'Invalid request: info object is required.' });
@@ -3518,17 +4035,60 @@ app.put('/api/reference/update/:id', async (req, res) => {
           ...updatedInfo
       });
 
+      const beforeRelationships = {
+          parentId: uniqueRelationshipArray(existingRecord.parentId),
+          children: uniqueRelationshipArray(existingRecord.children)
+      };
+
       const setFields = { info: mergedInfo };
 
       if (Object.prototype.hasOwnProperty.call(req.body, 'parentId')) {
-          setFields.parentId = normaliseRelationshipArray(req.body.parentId);
+          setFields.parentId = uniqueRelationshipArray(req.body.parentId);
       }
 
       if (Object.prototype.hasOwnProperty.call(req.body, 'children')) {
-          setFields.children = normaliseRelationshipArray(req.body.children);
+          setFields.children = uniqueRelationshipArray(req.body.children);
       }
 
+      const afterRelationships = {
+          parentId: Object.prototype.hasOwnProperty.call(setFields, 'parentId') ? setFields.parentId : beforeRelationships.parentId,
+          children: Object.prototype.hasOwnProperty.call(setFields, 'children') ? setFields.children : beforeRelationships.children
+      };
+
+      if (afterRelationships.parentId.includes(id) || afterRelationships.children.includes(id)) {
+          return res.status(400).json({ message: 'A record cannot be its own parent or child.' });
+      }
+
+      const missingRelationshipTargets = await findMissingRelationshipTargets(
+          collection,
+          [...afterRelationships.parentId, ...afterRelationships.children]
+      );
+
+      if (missingRelationshipTargets.length) {
+          return res.status(400).json({
+              message: `Relationship target ID${missingRelationshipTargets.length === 1 ? '' : 's'} not found: ${missingRelationshipTargets.join(', ')}`,
+              missingRelationshipTargets
+          });
+      }
+
+      const relationshipDiff = summariseRelationshipSync({
+          addedParentIds: getArrayDiff(beforeRelationships.parentId, afterRelationships.parentId).added,
+          removedParentIds: getArrayDiff(beforeRelationships.parentId, afterRelationships.parentId).removed,
+          addedChildIds: getArrayDiff(beforeRelationships.children, afterRelationships.children).added,
+          removedChildIds: getArrayDiff(beforeRelationships.children, afterRelationships.children).removed
+      });
+
       const result = await collection.updateOne({ id }, { $set: setFields });
+
+      let reciprocalSync = summariseRelationshipSync();
+      if (syncRelationships && relationshipDiff.changedCount) {
+          reciprocalSync = await applyReciprocalRelationshipChanges(
+              collection,
+              id,
+              beforeRelationships,
+              afterRelationships
+          );
+      }
 
       if (result.matchedCount === 1) {
           const updatedRecord = await collection.findOne({ id });
@@ -3536,7 +4096,10 @@ app.put('/api/reference/update/:id', async (req, res) => {
           const documentsById = new Map(documents.map(document => [document.id, document]).filter(([recordId]) => recordId));
           res.json({
               message: result.modifiedCount === 1 ? 'Record updated successfully.' : 'Record found; no changes were needed.',
-              record: summariseBatchReferenceRecord(updatedRecord, documentsById)
+              record: summariseBatchReferenceRecord(updatedRecord, documentsById),
+              relationshipDiff,
+              reciprocalSyncApplied: syncRelationships,
+              reciprocalSync
           });
       } else {
           res.status(404).json({ message: 'Record not found.' });
@@ -3568,16 +4131,19 @@ app.get('/api/reference/type/:type', async (req, res) => {
 });
 
 
-// Endpoint to add a new record with parent validation and child addition
+// Endpoint to add a new record. Parent/child IDs are validated.
+// By default, reciprocal links are added to the related records.
 app.post('/api/reference/new', async (req, res) => {
   const session = client.startSession();
   
   try {
-      const newRecord = req.body;
+      const newRecord = { ...(req.body || {}) };
       const collection = db.collection('reference');
+      const syncRelationships = newRecord.syncRelationships !== false;
+      delete newRecord.syncRelationships;
 
-      newRecord.parentId = normaliseRelationshipArray(newRecord.parentId);
-      newRecord.children = normaliseRelationshipArray(newRecord.children);
+      newRecord.parentId = uniqueRelationshipArray(newRecord.parentId);
+      newRecord.children = uniqueRelationshipArray(newRecord.children);
       newRecord.info = normaliseInfo(newRecord.info || {});
 
       const sourceMeta = normaliseSourceMeta(newRecord.sourceMeta);
@@ -3590,34 +4156,44 @@ app.post('/api/reference/new', async (req, res) => {
       // Start a transaction
       session.startTransaction();
       
-      // Validate parent IDs
-      if (newRecord.parentId && newRecord.parentId.length > 0) {
-          const parentIds = newRecord.parentId;
-          const existingParents = await collection.find({ id: { $in: parentIds } }).toArray();
-          
-          if (existingParents.length !== parentIds.length) {
-              throw new Error('One or more parent IDs do not exist.');
-          }
+      const missingRelationshipTargets = await findMissingRelationshipTargets(
+          collection,
+          [...newRecord.parentId, ...newRecord.children]
+      );
+
+      if (missingRelationshipTargets.length) {
+          throw new Error(`Relationship target ID${missingRelationshipTargets.length === 1 ? '' : 's'} not found: ${missingRelationshipTargets.join(', ')}`);
       }
 
       // Generate a new UUID for the record
       const recordId = uuidv4();
       newRecord.id = recordId;
 
+      if (newRecord.parentId.includes(recordId) || newRecord.children.includes(recordId)) {
+          throw new Error('A record cannot be its own parent or child.');
+      }
+
       // Insert the new record
       const result = await collection.insertOne(newRecord);
 
       if (result.acknowledged) {
-          // Update the parent's children arrays
-          if (newRecord.parentId && newRecord.parentId.length > 0) {
-              await collection.updateMany(
-                  { id: { $in: newRecord.parentId } },
-                  { $addToSet: { children: recordId } }
+          let reciprocalSync = summariseRelationshipSync();
+          if (syncRelationships) {
+              reciprocalSync = await applyReciprocalRelationshipChanges(
+                  collection,
+                  recordId,
+                  { parentId: [], children: [] },
+                  { parentId: newRecord.parentId, children: newRecord.children }
               );
           }
 
           await session.commitTransaction();
-          res.json({ message: 'Record added successfully.', id: newRecord.id });
+          res.json({
+              message: 'Record added successfully.',
+              id: newRecord.id,
+              reciprocalSyncApplied: syncRelationships,
+              reciprocalSync
+          });
       } else {
           throw new Error('Failed to add the record.');
       }

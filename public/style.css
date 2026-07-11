@@ -1660,6 +1660,26 @@ nav ul li a:hover {
     font-weight: bold;
 }
 
+.csv-import-relationship-ambiguous {
+    background: #fff0a8;
+    border: 1px solid #d4a50088;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+.csv-import-relationship-ambiguous-select {
+    border-color: #d4a500;
+    background: #fff8c9;
+}
+
+.csv-import-relationship-hint {
+    flex-basis: 100%;
+    margin-left: 158px;
+    font-size: 11px;
+    color: #805f00;
+    font-weight: normal !important;
+}
+
 .csv-import-warning {
     margin: 8px 0;
     padding: 8px;
@@ -1838,7 +1858,9 @@ nav ul li a:hover {
 #batch-load-cluster-button,
 .batch-records-workbench-actions button,
 .batch-operation-grid button,
-.batch-apply-field-grid button {
+.batch-apply-field-grid button,
+.batch-delete-controls button,
+.batch-secondary-action {
     padding: 8px 12px;
     border: none;
     border-radius: 999px;
@@ -1853,7 +1875,9 @@ nav ul li a:hover {
 #batch-load-cluster-button:hover:not(:disabled),
 .batch-records-workbench-actions button:hover:not(:disabled),
 .batch-operation-grid button:hover:not(:disabled),
-.batch-apply-field-grid button:hover:not(:disabled) {
+.batch-apply-field-grid button:hover:not(:disabled),
+.batch-delete-controls button:hover:not(:disabled),
+.batch-secondary-action:hover:not(:disabled) {
     background: #555;
 }
 
@@ -1861,7 +1885,9 @@ nav ul li a:hover {
 #batch-load-cluster-button:disabled,
 .batch-records-workbench-actions button:disabled,
 .batch-operation-grid button:disabled,
-.batch-apply-field-grid button:disabled {
+.batch-apply-field-grid button:disabled,
+.batch-delete-controls button:disabled,
+.batch-secondary-action:disabled {
     opacity: 0.45;
     cursor: not-allowed;
 }
@@ -2063,6 +2089,56 @@ nav ul li a:hover {
     margin-bottom: 8px;
     font-weight: bold;
     font-size: 14px;
+}
+
+
+.batch-secondary-action {
+    margin-top: 8px;
+}
+
+.batch-delete-controls {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto auto;
+    gap: 10px;
+    align-items: end;
+}
+
+.batch-delete-controls .batch-checkbox-label {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    align-items: center;
+    font-size: 12px;
+    opacity: 0.82;
+}
+
+.batch-delete-subpanel {
+    border-color: rgba(112, 36, 36, 0.28);
+    background: rgba(255, 230, 230, 0.28);
+}
+
+.batch-delete-impact-section {
+    margin-top: 10px;
+}
+
+.batch-delete-impact-section > strong {
+    display: block;
+    margin-bottom: 6px;
+}
+
+.batch-delete-warning {
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(255, 246, 122, 0.72);
+    font-size: 12px;
+}
+
+.batch-danger-action {
+    background: #692f42 !important;
+}
+
+.batch-danger-action:hover:not(:disabled) {
+    background: #8b3f58 !important;
 }
 
 .batch-apply-field-grid {
@@ -2515,8 +2591,156 @@ nav ul li a:hover {
     cursor: wait;
 }
 
+
+.csv-import-followup-loading {
+    min-height: 190px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 28px;
+    background: #d8f4ef99;
+    border: 1px solid #0000001f;
+    border-radius: 12px;
+    text-align: center;
+}
+
+.csv-import-followup-loading.hidden,
+.csv-import-followup-step.hidden {
+    display: none;
+}
+
+.csv-import-followup-spinner {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    border: 5px solid #00000018;
+    border-top-color: #ffa8e8;
+    animation: csv-followup-spin 900ms linear infinite;
+}
+
+@keyframes csv-followup-spin {
+    to { transform: rotate(360deg); }
+}
+
+.csv-import-followup-step {
+    display: block;
+}
+
+.csv-import-followup-optional {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: #ffffff99;
+    font-size: 11px;
+    font-weight: normal;
+    opacity: 0.7;
+}
+
+.csv-import-followup-checkbox-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0 12px 0;
+    font-size: 13px;
+}
+
+.csv-import-followup-skip-line {
+    color: #777;
+}
+
+.csv-import-followup-step-skipped .csv-import-followup-field,
+.csv-import-followup-step-skipped .csv-import-followup-checkboxes {
+    opacity: 0.42;
+}
+
 @media (max-width: 760px) {
     .csv-import-followup-grid {
         grid-template-columns: 1fr;
     }
+}
+
+/* Relationship lookup and reviewed single-delete safety */
+.relationship-lookup-controls {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) auto minmax(260px, 1.5fr) auto;
+    gap: 6px;
+    align-items: center;
+    margin: 6px 0 10px 20%;
+    max-width: 80%;
+}
+
+.relationship-lookup-controls-compact {
+    margin: -4px 0 12px 0;
+    max-width: 100%;
+    grid-template-columns: minmax(140px, 1fr) auto minmax(220px, 1.2fr) auto;
+}
+
+.relationship-lookup-controls input,
+.relationship-lookup-controls select {
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 12px;
+}
+
+.relationship-lookup-controls button {
+    padding: 6px 9px;
+    border: none;
+    border-radius: 999px;
+    background: #ffa8e8;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+}
+
+.relationship-lookup-controls button:hover:not(:disabled) {
+    background: #f6e67a;
+}
+
+.relationship-lookup-controls button:disabled,
+.relationship-lookup-controls select:disabled {
+    opacity: 0.52;
+    cursor: not-allowed;
+}
+
+.relationship-lookup-status {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    opacity: 0.65;
+}
+
+.delete-impact-preview {
+    margin-top: 16px;
+    max-width: 76vw;
+}
+
+.delete-impact-summary {
+    padding: 12px;
+    background: #ffffffaa;
+    border: 1px solid #00000022;
+    border-radius: 8px;
+}
+
+.delete-impact-summary h3 {
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.delete-impact-record-list {
+    margin: 10px 0;
+    padding: 10px 10px 10px 26px;
+    list-style: disc;
+    background: #ffffff88;
+    border: 1px solid #00000018;
+    border-radius: 8px;
+}
+
+.delete-impact-record-list li {
+    margin-bottom: 5px;
+    font-size: 13px;
 }

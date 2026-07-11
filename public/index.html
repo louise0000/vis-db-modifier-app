@@ -120,7 +120,8 @@
           <input type="text" id="query-delete" placeholder="Enter search term...">
           <button id="query-button-delete">Search</button>
           <div id="result-delete"></div>
-          <button id="delete-selected-records" style="display:none;">Delete Selected</button>
+          <button id="delete-selected-records" style="display:none;">Preview Delete Impact</button>
+          <div id="delete-impact-preview" class="delete-impact-preview"></div>
       </div>
     </div>
 
@@ -289,6 +290,8 @@
           </div>
           <div id="batch-root-results" class="batch-root-results"></div>
           <div id="batch-selected-root" class="batch-selected-root">No source selected.</div>
+          <button id="batch-rebuild-curation-connections" class="batch-secondary-action" type="button" disabled>Rebuild Saved Curation Connections</button>
+          <div id="batch-curation-repair-status" class="batch-cluster-status"></div>
         </div>
 
         <div class="batch-records-panel batch-records-scope-panel">
@@ -385,6 +388,24 @@
           <div id="batch-field-apply-preview" class="batch-operation-preview"></div>
         </div>
 
+        <div class="batch-operation-subpanel batch-delete-subpanel">
+          <h4>Delete selected records</h4>
+          <p>Preview impact before deleting. Default cleanup removes deleted record IDs from other records and saved curations, but does not delete whole curations.</p>
+          <div class="batch-delete-controls">
+            <label class="batch-checkbox-label">
+              <input type="checkbox" id="batch-delete-cleanup-relationships" checked>
+              clean parent/child references from other records
+            </label>
+            <label class="batch-checkbox-label">
+              <input type="checkbox" id="batch-delete-cleanup-curations" checked>
+              remove deleted nodes/connections from saved curations
+            </label>
+            <button id="batch-preview-delete" type="button" disabled>Preview Delete Impact</button>
+            <button id="batch-commit-delete" class="batch-danger-action" type="button" disabled>Commit Reviewed Delete</button>
+          </div>
+          <div id="batch-delete-preview" class="batch-operation-preview"></div>
+        </div>
+
         <div class="batch-operation-subpanel">
           <h4>Add a relationship across selected records</h4>
           <div class="batch-operation-grid">
@@ -431,35 +452,45 @@
         <button id="csv-import-followup-close" type="button" aria-label="Close follow-up">×</button>
       </div>
 
-      <div class="csv-import-followup-grid">
-        <section class="csv-import-followup-section">
-          <h3>Create saved diagram</h3>
-          <p>Create an unarranged curation from the committed database records. The visual app can load it and let you arrange positions later.</p>
-          <label class="csv-import-followup-field">
-            <span>Curation name</span>
-            <input id="csv-import-followup-curation-name" type="text" placeholder="e.g. Imported Deleuze / Guattari books">
-          </label>
-          <div class="csv-import-followup-checkboxes">
-            <label><input id="csv-import-followup-include-created" type="checkbox" checked> include created records</label>
-            <label><input id="csv-import-followup-include-merged" type="checkbox" checked> include merged records</label>
-          </div>
-        </section>
-
-        <section class="csv-import-followup-section">
-          <h3>Image queue</h3>
-          <p>Send committed records without images to the existing Image Queue for SerpAPI review/upload.</p>
-          <div class="csv-import-followup-checkboxes">
-            <label><input id="csv-import-followup-queue-people" type="checkbox"> people</label>
-            <label><input id="csv-import-followup-queue-artworkbooks" type="checkbox"> artwork/books</label>
-          </div>
-        </section>
+      <div id="csv-import-followup-loading" class="csv-import-followup-loading hidden" aria-live="polite">
+        <div class="csv-import-followup-spinner" aria-hidden="true"></div>
+        <p id="csv-import-followup-loading-text">Working…</p>
       </div>
+
+      <section id="csv-import-followup-step-curation" class="csv-import-followup-section csv-import-followup-step hidden">
+        <h3>Create saved diagram <span class="csv-import-followup-optional">optional</span></h3>
+        <p>Create an unarranged curation from the committed database records. The visual app can load it and let you arrange positions later.</p>
+        <label class="csv-import-followup-checkbox-line csv-import-followup-skip-line">
+          <input id="csv-import-followup-skip-curation" type="checkbox">
+          Skip this step
+        </label>
+        <label class="csv-import-followup-field">
+          <span>Curation name</span>
+          <input id="csv-import-followup-curation-name" type="text" placeholder="e.g. Imported Deleuze / Guattari books">
+        </label>
+        <div class="csv-import-followup-checkboxes">
+          <label><input id="csv-import-followup-include-created" type="checkbox" checked> include created records</label>
+          <label><input id="csv-import-followup-include-merged" type="checkbox" checked> include merged records</label>
+        </div>
+      </section>
+
+      <section id="csv-import-followup-step-images" class="csv-import-followup-section csv-import-followup-step hidden">
+        <h3>Image queue <span class="csv-import-followup-optional">optional</span></h3>
+        <p>Send committed records without images to the existing Image Queue for SerpAPI review/upload.</p>
+        <label class="csv-import-followup-checkbox-line csv-import-followup-skip-line">
+          <input id="csv-import-followup-skip-images" type="checkbox">
+          Skip this step
+        </label>
+        <div class="csv-import-followup-checkboxes">
+          <label><input id="csv-import-followup-queue-people" type="checkbox"> people</label>
+          <label><input id="csv-import-followup-queue-artworkbooks" type="checkbox"> artwork/books</label>
+        </div>
+      </section>
 
       <div id="csv-import-followup-status" class="csv-import-followup-status"></div>
 
       <div class="csv-import-followup-actions">
-        <button id="csv-import-followup-done" type="button">Done</button>
-        <button id="csv-import-followup-apply" type="button">Apply follow-up</button>
+        <button id="csv-import-followup-next" type="button">Next</button>
       </div>
     </div>
   </div>
